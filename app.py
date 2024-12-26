@@ -6,9 +6,12 @@ from gradio_client.exceptions import AppError
 import numpy as np
 import shutil
 from PIL import Image
+import json
 
-# Import the apply_bokeh function from main.py
-from main import apply_bokeh
+# from main import apply_bokeh
+# from main import apply_bokeh_2
+from main import apply_bokeh_3
+from main import apply_bokeh_4
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -42,10 +45,27 @@ def upload_file():
         app.logger.info(f"Original image saved to {filepath}")
         
         app.logger.info("Calling Depth-Anything-V2 API")
+        img = handle_file(filepath)
+        print("IMG IS:", img)
+        
+        # Add debug logging to see the actual request
+        old_send_data = depth_client.send_data
+        def logging_send_data(data, hash_data, protocol):
+            print("\nDEBUG: Sending data to API:")
+            print("Data:", json.dumps(data, indent=2))
+            print("Hash data:", json.dumps(hash_data, indent=2))
+            print("Protocol:", protocol)
+            return old_send_data(data, hash_data, protocol)
+            
+        depth_client.send_data = logging_send_data
+        
         result = depth_client.predict(
-            image=handle_file(filepath),
+            image=img,
             api_name="/on_submit"
         )
+        # Restore original method
+        depth_client.send_data = old_send_data
+        
         app.logger.info(f"API response: {result}")
         
         if not result or len(result) < 2 or not result[1]:
@@ -74,6 +94,7 @@ def process_image():
     data = request.json
     x, y = data['x'], data['y']
     multiplier = data['multiplier']
+    depth_of_field = float(data.get('depthOfField', 0.1))  # Default to 0.1 if not provided
     
     # Load the original image and depth map
     original_image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'original.png')
@@ -97,7 +118,7 @@ def process_image():
     
     # Apply bokeh effect using the function from main.py
     print("HAVE DEPTH:", focus_depth)
-    processed_image = apply_bokeh(original_image, depth_map, focus_depth, 2**float(multiplier))
+    processed_image = apply_bokeh_4(original_image, depth_map, focus_depth, 2**float(multiplier), depth_of_field)
     
     # Save processed image
     processed_image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'processed.png')

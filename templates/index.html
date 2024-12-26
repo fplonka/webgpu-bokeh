@@ -22,6 +22,11 @@
                 <input type="range" id="blurStrength" min="1" max="6" step="0.1" value="3">
                 <input type="number" id="blurStrengthValue" min="1" max="6" step="0.1" value="3">
             </div>
+            <label for="depthOfField">Depth of Field:</label>
+            <div>
+                <input type="range" id="depthOfField" min="0.01" max="0.5" step="0.01" value="0.1">
+                <input type="number" id="depthOfFieldValue" min="0.01" max="0.5" step="0.01" value="0.1">
+            </div>
         </div>
         <details>
             <summary>Debug Data</summary>
@@ -41,6 +46,8 @@
         const loadingIndicator = document.getElementById('loadingIndicator');
         const blurStrength = document.getElementById('blurStrength');
         const blurStrengthValue = document.getElementById('blurStrengthValue');
+        const depthOfField = document.getElementById('depthOfField');
+        const depthOfFieldValue = document.getElementById('depthOfFieldValue');
 
         let debounceTimeout;
 
@@ -50,7 +57,8 @@
                 const response = await axios.post('/process', {
                     x: x,
                     y: y,
-                    multiplier: multiplier
+                    multiplier: multiplier,
+                    depthOfField: depthOfField.value
                 });
                 const timestamp = new Date().getTime();
                 processedImage.src = `${response.data.processed_image_url}?t=${timestamp}`;
@@ -63,7 +71,7 @@
         }
 
         imageUpload.addEventListener('change', async (event) => {
-            
+
             const file = event.target.files[0];
             const formData = new FormData();
             formData.append('image', file);
@@ -100,24 +108,18 @@
 
         blurStrength.addEventListener('input', (event) => {
             blurStrengthValue.value = event.target.value;
-            clearTimeout(debounceTimeout);
-            debounceTimeout = setTimeout(() => {
-                const rect = processedImage.getBoundingClientRect();
-                const x = rect.width / 2;
-                const y = rect.height / 2;
-                processImage(x / processedImage.width, y / processedImage.height, blurStrength.value);
-            }, 500);
         });
 
         blurStrengthValue.addEventListener('input', (event) => {
             blurStrength.value = event.target.value;
-            clearTimeout(debounceTimeout);
-            debounceTimeout = setTimeout(() => {
-                const rect = processedImage.getBoundingClientRect();
-                const x = rect.width / 2;
-                const y = rect.height / 2;
-                processImage(x / processedImage.width, y / processedImage.height, blurStrength.value);
-            }, 500);
+        });
+
+        depthOfField.addEventListener('input', (event) => {
+            depthOfFieldValue.value = event.target.value;
+        });
+
+        depthOfFieldValue.addEventListener('input', (event) => {
+            depthOfField.value = event.target.value;
         });
     </script>
 </body>
