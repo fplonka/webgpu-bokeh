@@ -2,265 +2,269 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
+	"context"
 	"encoding/json"
 	"fmt"
 	"image"
-	_ "image/gif"  // Register GIF format
-	_ "image/jpeg" // Register JPEG format
-	_ "image/png"  // Register PNG format
-
-	_ "golang.org/x/image/tiff" // Register TIFF format from x/image
-	_ "golang.org/x/image/webp" // Register WebP format from x/image
-
+	_ "image/gif"
+	_ "image/jpeg"
+	"image/png"
+	_ "image/png"
 	"io"
-	"log"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"strings"
 	"time"
+
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 const (
-	// Index in the response array for different outputs:
-	// 0: "Depth Map with Slider View" (Imageslider component)
-	// 1: "Grayscale depth map" (File component)
-	// 2: "16-bit raw output" (File component)
-	DEPTH_MAP_INDEX = 1 // Change this to try different outputs
+	apiBaseURL   = "https://depth-anything-depth-anything-v2.hf.space"
+	pollTimeout  = 30 * time.Second
+	pollInterval = 2 * time.Second
+	maxFileSize  = 10 << 20 // 10 MB
+
+	// Response array indices for different outputs
+	depthMapIndex = 1 // 0: slider view, 1: grayscale, 2: 16-bit raw
 )
 
-type HFRequest struct {
-	Data []map[string]string `json:"data"`
+// API request/response types
+type (
+	uploadResponse []string
+
+	eventIDResponse struct {
+		EventID string `json:"event_id"`
+	}
+
+	fileData struct {
+		Path string            `json:"path"`
+		Meta map[string]string `json:"meta"`
+	}
+
+	apiRequest struct {
+		Data []fileData `json:"data"`
+	}
+)
+
+func init() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 }
 
-type HFResponse struct {
-	Done bool     `json:"done"`
-	Data []string `json:"data"`
-}
-
+// uploadToHF uploads an image to the HF server and returns its path
 func uploadToHF(imageBytes []byte, filename string) (string, error) {
-	// Create a buffer for the multipart form data
-	var requestBody bytes.Buffer
-	writer := multipart.NewWriter(&requestBody)
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
 
-	// Create form file field
 	part, err := writer.CreateFormFile("files", filename)
 	if err != nil {
-		return "", fmt.Errorf("failed to create form file: %v", err)
+		return "", fmt.Errorf("create form file: %w", err)
 	}
 
-	// Write the image bytes
 	if _, err := part.Write(imageBytes); err != nil {
-		return "", fmt.Errorf("failed to write image bytes: %v", err)
+		return "", fmt.Errorf("write image bytes: %w", err)
 	}
-
-	// Close the writer
 	writer.Close()
 
-	// Make the upload request
-	req, err := http.NewRequest("POST", "https://depth-anything-depth-anything-v2.hf.space/upload", &requestBody)
+	req, err := http.NewRequest("POST", apiBaseURL+"/upload", &buf)
 	if err != nil {
-		return "", fmt.Errorf("failed to create upload request: %v", err)
+		return "", fmt.Errorf("create upload request: %w", err)
 	}
-
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	// Send the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to upload file: %v", err)
+		return "", fmt.Errorf("upload request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Read response
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read upload response: %v", err)
-	}
-
-	// Response is a JSON array with one string (the file path)
-	var result []string
-	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		return "", fmt.Errorf("failed to parse upload response: %v", err)
+	var result uploadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode upload response: %w", err)
 	}
 
 	if len(result) == 0 {
 		return "", fmt.Errorf("empty upload response")
 	}
 
+	slog.Info("uploaded image", "path", result[0])
 	return result[0], nil
 }
 
-func fetchDepthMap(imageBytes []byte) ([]byte, error) {
-	// First upload the file
-	uploadedPath, err := uploadToHF(imageBytes, "image.jpg")
-	if err != nil {
-		return nil, fmt.Errorf("failed to upload image: %v", err)
-	}
-
-	fmt.Printf("File uploaded successfully, got path: %s\n", uploadedPath)
-
-	// Prepare the request to Hugging Face using the uploaded file path
-	reqData := map[string]interface{}{
-		"data": []interface{}{
-			map[string]interface{}{
-				"path":      uploadedPath,
-				"orig_name": "image.jpg",
-				"meta": map[string]string{
-					"_type": "gradio.FileData",
-				},
-			},
-		},
+// getEventID makes the initial API call and returns an event ID for polling
+func getEventID(uploadedPath string) (string, error) {
+	reqData := apiRequest{
+		Data: []fileData{{
+			Path: uploadedPath,
+			Meta: map[string]string{"_type": "gradio.FileData"},
+		}},
 	}
 
 	reqBody, err := json.Marshal(reqData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %v", err)
+		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	fmt.Printf("Sending request body: %s\n", string(reqBody))
-
-	// Make the initial POST request
-	req, err := http.NewRequest("POST", "https://depth-anything-depth-anything-v2.hf.space/call/on_submit", bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", apiBaseURL+"/call/on_submit", bytes.NewBuffer(reqBody))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
+		return "", fmt.Errorf("create API request: %w", err)
 	}
-
 	req.Header.Set("Content-Type", "application/json")
 
-	// Send the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to make POST request: %v", err)
+		return "", fmt.Errorf("API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Read the response body
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %v", err)
-	}
-	fmt.Println("Response body:", string(bodyBytes))
-
-	// Parse the event ID from the bytes we already read
-	var result struct {
-		EventID string `json:"event_id"`
-	}
-	if err := json.Unmarshal(bodyBytes, &result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %v", err)
+	var result eventIDResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode event ID response: %w", err)
 	}
 
-	fmt.Printf("Got event ID: %s\n", result.EventID)
-
-	// Poll for results
-	for i := 0; i < 30; i++ { // Try for 30 seconds max
-		fmt.Println("i is", i)
-		resp, err := http.Get(fmt.Sprintf(
-			"https://depth-anything-depth-anything-v2.hf.space/call/on_submit/%s",
-			result.EventID,
-		))
-		if err != nil {
-			return nil, fmt.Errorf("failed to make GET request: %v", err)
-		}
-
-		// Read and print the response body for polling requests
-		bodyBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to read polling response body: %v", err)
-		}
-		resp.Body.Close()
-
-		bodyStr := string(bodyBytes)
-		fmt.Printf("Polling response body (raw):\n%s\n", bodyStr)
-
-		// Check if it's an error response
-		if bodyStr == "event: error\ndata: null\n\n" {
-			return nil, fmt.Errorf("received error from API")
-		}
-
-		// Parse SSE format
-		if bodyStr == "" {
-			// Empty response, keep polling
-			time.Sleep(time.Second)
-			continue
-		}
-
-		// Check if it's a complete event
-		if !strings.HasPrefix(bodyStr, "event: complete") {
-			time.Sleep(time.Second)
-			continue
-		}
-
-		// Extract the data part
-		dataLines := []string{}
-		for _, line := range strings.Split(bodyStr, "\n") {
-			if strings.HasPrefix(line, "data: ") {
-				dataLines = append(dataLines, strings.TrimPrefix(line, "data: "))
-			}
-		}
-
-		// Combine all data lines into one JSON string
-		jsonStr := strings.Join(dataLines, "")
-		fmt.Printf("Combined JSON: %s\n", jsonStr)
-
-		// Parse the combined JSON
-		var result []interface{}
-		if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-			fmt.Printf("Failed to parse combined JSON: %v\n", err)
-			time.Sleep(time.Second)
-			continue
-		}
-
-		// The depth map we want is at DEPTH_MAP_INDEX in the response array
-		if len(result) <= DEPTH_MAP_INDEX {
-			fmt.Printf("Response array too short, only got %d elements\n", len(result))
-			continue
-		}
-
-		// Get the depth map data
-		depthMap, ok := result[DEPTH_MAP_INDEX].(map[string]interface{})
-		if !ok {
-			fmt.Printf("Failed to parse depth map at index %d\n", DEPTH_MAP_INDEX)
-			continue
-		}
-
-		// Get the depth map path
-		path, ok := depthMap["path"].(string)
-		if !ok {
-			continue
-		}
-
-		fmt.Printf("Got depth map path from index %d: %s\n", DEPTH_MAP_INDEX, path)
-
-		// Construct the correct URL for downloading
-		downloadURL := fmt.Sprintf("https://depth-anything-depth-anything-v2.hf.space/file=%s", path)
-		fmt.Printf("Downloading from URL: %s\n", downloadURL)
-
-		// Download the depth map file
-		resp, err = http.Get(downloadURL)
-		if err != nil {
-			return nil, fmt.Errorf("failed to download depth map: %v", err)
-		}
-		defer resp.Body.Close()
-
-		return io.ReadAll(resp.Body)
-	}
-
-	return nil, fmt.Errorf("timeout waiting for depth map")
+	slog.Info("got event ID", "id", result.EventID)
+	return result.EventID, nil
 }
 
-func main() {
-	// Serve static files
-	http.Handle("/", http.FileServer(http.Dir("static")))
+// pollForResult polls the API until we get a complete response or timeout
+func pollForResult(eventID string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
+	defer cancel()
 
-	// Handle image upload and depth map generation
-	http.HandleFunc("/api/upload", handleUpload)
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
 
-	fmt.Println("Server running on http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("polling timed out after %v", pollTimeout)
+		case <-ticker.C:
+			resp, err := http.Get(fmt.Sprintf("%s/call/on_submit/%s", apiBaseURL, eventID))
+			if err != nil {
+				return nil, fmt.Errorf("polling request failed: %w", err)
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				return nil, fmt.Errorf("read polling response: %w", err)
+			}
+
+			bodyStr := string(body)
+			if bodyStr == "event: error\ndata: null\n\n" {
+				return nil, fmt.Errorf("API returned error")
+			}
+			if bodyStr == "" || !strings.HasPrefix(bodyStr, "event: complete") {
+				continue
+			}
+
+			// Extract and combine data lines
+			var dataLines []string
+			for _, line := range strings.Split(bodyStr, "\n") {
+				if strings.HasPrefix(line, "data: ") {
+					dataLines = append(dataLines, strings.TrimPrefix(line, "data: "))
+				}
+			}
+
+			jsonStr := strings.Join(dataLines, "")
+			var result []interface{}
+			if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+				slog.Warn("failed to parse response JSON", "error", err)
+				continue
+			}
+
+			// Get depth map URL and download it
+			if depthMapURL, err := extractDepthMapURL(result); err == nil {
+				return downloadDepthMap(depthMapURL)
+			}
+		}
+	}
+}
+
+// extractDepthMapURL gets the depth map URL from the response
+func extractDepthMapURL(result []interface{}) (string, error) {
+	if len(result) <= depthMapIndex {
+		return "", fmt.Errorf("response too short: %d elements", len(result))
+	}
+
+	depthMap, ok := result[depthMapIndex].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid depth map data at index %d", depthMapIndex)
+	}
+
+	path, ok := depthMap["path"].(string)
+	if !ok {
+		return "", fmt.Errorf("no path in depth map data")
+	}
+
+	url := fmt.Sprintf("%s/file=%s", apiBaseURL, path)
+	slog.Info("got depth map URL", "url", url)
+	return url, nil
+}
+
+// downloadDepthMap downloads the depth map from the given URL
+func downloadDepthMap(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read depth map: %w", err)
+	}
+
+	slog.Info("downloaded depth map", "size", len(data))
+	return data, nil
+}
+
+// parseDepthMap converts the PNG depth map into a 2D array of float values
+func parseDepthMap(data []byte) ([][]float64, error) {
+	img, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode depth map PNG: %w", err)
+	}
+
+	bounds := img.Bounds()
+	width := bounds.Max.X - bounds.Min.X
+	height := bounds.Max.Y - bounds.Min.Y
+
+	// Convert to grayscale values
+	values := make([][]float64, height)
+	for y := 0; y < height; y++ {
+		values[y] = make([]float64, width)
+		for x := 0; x < width; x++ {
+			r, _, _, _ := img.At(x, y).RGBA()
+			// Convert from 0-65535 to 0-1 range
+			values[y][x] = float64(r) / 65535.0
+		}
+	}
+
+	return values, nil
+}
+
+// fetchDepthMap orchestrates the entire process of getting a depth map
+func fetchDepthMap(imageBytes []byte) ([]byte, error) {
+	uploadedPath, err := uploadToHF(imageBytes, "image.jpg")
+	if err != nil {
+		return nil, fmt.Errorf("upload failed: %w", err)
+	}
+
+	eventID, err := getEventID(uploadedPath)
+	if err != nil {
+		return nil, fmt.Errorf("get event ID failed: %w", err)
+	}
+
+	depthMap, err := pollForResult(eventID)
+	if err != nil {
+		return nil, fmt.Errorf("polling failed: %w", err)
+	}
+
+	return depthMap, nil
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -281,16 +285,15 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse the multipart form data
-	err := r.ParseMultipartForm(10 << 20) // 10 MB max
-	if err != nil {
-		fmt.Println("Failed to parse form", err)
+	if err := r.ParseMultipartForm(maxFileSize); err != nil {
+		slog.Error("failed to parse form", "error", err)
 		http.Error(w, "Failed to parse form", http.StatusBadRequest)
 		return
 	}
 
 	file, _, err := r.FormFile("image")
 	if err != nil {
-		fmt.Println("Failed to get file", err)
+		slog.Error("failed to get file", "error", err)
 		http.Error(w, "Failed to get file", http.StatusBadRequest)
 		return
 	}
@@ -299,7 +302,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	// Read the image
 	fileBytes, err := io.ReadAll(file)
 	if err != nil {
-		fmt.Println("Failed to read file", err)
+		slog.Error("failed to read file", "error", err)
 		http.Error(w, "Failed to read file", http.StatusBadRequest)
 		return
 	}
@@ -307,17 +310,25 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	// Verify image format
 	img, format, err := image.Decode(bytes.NewReader(fileBytes))
 	if err != nil {
-		fmt.Printf("Failed to decode image (format: %s): %v\n", format, err)
+		slog.Error("failed to decode image", "format", format, "error", err)
 		http.Error(w, "Failed to decode image", http.StatusBadRequest)
 		return
 	}
-	fmt.Printf("Successfully decoded image of format: %s\n", format)
+	slog.Info("decoded image", "format", format)
 
 	// Fetch depth map from Hugging Face
 	depthMapBytes, err := fetchDepthMap(fileBytes)
 	if err != nil {
-		fmt.Printf("Failed to fetch depth map: %v\n", err)
+		slog.Error("failed to fetch depth map", "error", err)
 		http.Error(w, "Failed to generate depth map", http.StatusInternalServerError)
+		return
+	}
+
+	// Parse depth map into 2D array
+	depthValues, err := parseDepthMap(depthMapBytes)
+	if err != nil {
+		slog.Error("failed to parse depth map", "error", err)
+		http.Error(w, "Failed to parse depth map", http.StatusInternalServerError)
 		return
 	}
 
@@ -325,14 +336,28 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	response := map[string]interface{}{
-		"depth_map": map[string]string{
-			"data":   "data:image/png;base64," + base64.StdEncoding.EncodeToString(depthMapBytes),
-			"width":  fmt.Sprint(img.Bounds().Max.X - img.Bounds().Min.X),
-			"height": fmt.Sprint(img.Bounds().Max.Y - img.Bounds().Min.Y),
+		"depth_map": map[string]interface{}{
+			"values": depthValues,
+			"width":  img.Bounds().Max.X - img.Bounds().Min.X,
+			"height": img.Bounds().Max.Y - img.Bounds().Min.Y,
 		},
 	}
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		log.Printf("Error encoding response: %v", err)
+		slog.Error("failed to encode response", "error", err)
+	}
+}
+
+func main() {
+	// Serve static files
+	http.Handle("/", http.FileServer(http.Dir("static")))
+
+	// Handle image upload and depth map generation
+	http.HandleFunc("/api/upload", handleUpload)
+
+	slog.Info("server starting", "addr", "http://localhost:8080")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		slog.Error("server failed", "error", err)
+		os.Exit(1)
 	}
 }

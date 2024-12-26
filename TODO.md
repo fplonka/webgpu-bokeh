@@ -1,0 +1,2 @@
+- [ ] own hf space ..?
+- [ ] some red dot thing showing where the focus is
