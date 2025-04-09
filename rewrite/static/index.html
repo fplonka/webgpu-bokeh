@@ -1,165 +1,375 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
-    <title>Image Depth Map Generator</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>bokeh effect generator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-
-        .container {
-            background-color: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-        }
-
-        .image-container {
-            display: flex;
-            justify-content: space-between;
-            margin-top: 20px;
-            gap: 20px;
-        }
-
-        .image-wrapper {
-            flex: 1;
-            position: relative;
-        }
-
-        canvas {
-            width: 100%;
-            height: auto;
-            border-radius: 4px;
-            cursor: crosshair;
-        }
-
-        #upload {
-            display: none;
-        }
-
-        .upload-btn {
-            display: inline-block;
-            padding: 10px 20px;
-            background-color: #007bff;
-            color: white;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: background-color 0.2s;
-        }
-
-        .upload-btn:hover {
-            background-color: #0056b3;
-        }
-
-        #depth-value {
-            position: fixed;
-            background: rgba(0, 0, 0, 0.8);
-            color: white;
-            padding: 5px 10px;
-            border-radius: 4px;
-            display: none;
+        /* Essential styles for click indicator and loading spinner */
+        .click-indicator {
+            position: absolute;
+            width: 6px;
+            height: 6px;
+            background-color: red;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
             pointer-events: none;
+            opacity: 0.7;
+        }
+
+        .loading-overlay {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.9);
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
         }
     </style>
 </head>
 
-<body>
-    <div class="container">
-        <h1>Image Depth Map Generator</h1>
-        <label class="upload-btn" for="upload">Upload Image</label>
-        <input type="file" id="upload" accept="image/*">
+<body class="bg-zinc-100 flex justify-center items-center min-h-screen m-0">
+    <div class="shadow-md p-6 md:p-10 max-w-screen-md min-w-max-element bg-white border-zinc-100">
+        <h1 class="m-0 text-xl font-normal">bokeh effect generator</h1>
+        <div>
+            aaaaaaaaaaa abbbbbbbbb ccccccccy
+            aaaaaaaaaaa abbbbbbbbb ccccccccy
+            aaaaaaaaaaa abbbbbbbbb ccccccccy
+            aaaaaaaaaaa abbbbbbbbb ccccccccy
+            aaaaaaaaaaa abbbbbbbbb ccccccccy
+        </div>
 
-        <div class="image-container">
-            <div class="image-wrapper">
-                <canvas id="original"></canvas>
-            </div>
-            <div class="image-wrapper">
-                <canvas id="depth"></canvas>
+        <div
+            class="mt-6 border-2 border-dashed border-zinc-200 rounded-lg p-6 hover:border-zinc-400 transition-colors flex items-center gap-6">
+            <input type="file" id="imageUpload" accept="image/*" class="w-48">
+        </div>
+
+        <div class="mt-6">
+            <div class="relative">
+                <div class="relative inline-block">
+                    <canvas id="originalCanvas" class="max-w-full h-auto"></canvas>
+                    <div id="clickIndicator" class="click-indicator" style="display: none;"></div>
+                    <div id="loadingOverlay" class="loading-overlay">
+                        <div class="spinner"></div>
+                    </div>
+                </div>
+
+                <div class="mt-6 space-y-4">
+                    <div class="space-y-2">
+                        <label for="blurStrength" class="block text-zinc-600">Blur Strength</label>
+                        <div class="flex items-center gap-4">
+                            <input type="range" id="blurStrength" min="1" max="6" step="0.1" value="3" class="w-64">
+                            <input type="number" id="blurStrengthValue" min="1" max="6" step="0.1" value="3"
+                                class="w-20 p-1 border border-zinc-200 rounded">
+                        </div>
+                    </div>
+                    <div class="space-y-2">
+                        <label for="depthOfField" class="block text-zinc-600">Depth of Field</label>
+                        <div class="flex items-center gap-4">
+                            <input type="range" id="depthOfField" min="0.01" max="0.5" step="0.01" value="0.1"
+                                class="w-64">
+                            <input type="number" id="depthOfFieldValue" min="0.01" max="0.5" step="0.01" value="0.1"
+                                class="w-20 p-1 border border-zinc-200 rounded">
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
-    <div id="depth-value"></div>
 
     <script>
-        let depthData = null;
-        const originalCanvas = document.getElementById('original');
-        const depthCanvas = document.getElementById('depth');
-        const depthValue = document.getElementById('depth-value');
-        const upload = document.getElementById('upload');
+        const imageUpload = document.getElementById('imageUpload');
+        const originalCanvas = document.getElementById('originalCanvas');
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        const blurStrength = document.getElementById('blurStrength');
+        const blurStrengthValue = document.getElementById('blurStrengthValue');
+        const depthOfField = document.getElementById('depthOfField');
+        const depthOfFieldValue = document.getElementById('depthOfFieldValue');
+        const clickIndicator = document.getElementById('clickIndicator');
 
-        function drawImage(canvas, img) {
+        let depthData = null;
+        let originalImage = null;
+        let device = null;
+        let blurPipeline = null;
+        let originalPixels = null;
+
+        // Sync number inputs with range inputs
+        blurStrength.addEventListener('input', (e) => {
+            blurStrengthValue.value = e.target.value;
+        });
+        blurStrengthValue.addEventListener('input', (e) => {
+            blurStrength.value = e.target.value;
+        });
+        depthOfField.addEventListener('input', (e) => {
+            depthOfFieldValue.value = e.target.value;
+        });
+        depthOfFieldValue.addEventListener('input', (e) => {
+            depthOfField.value = e.target.value;
+        });
+
+        async function initWebGPU() {
+            if (!navigator.gpu) {
+                throw new Error("WebGPU not supported");
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            if (!adapter) {
+                throw new Error("No GPU adapter found");
+            }
+
+            device = await adapter.requestDevice();
+
+            // Load and compile both shaders
+            const [cocCode, bokehCode] = await Promise.all([
+                fetch('coc.wgsl').then(r => r.text()),
+                fetch('blur.wgsl').then(r => r.text())
+            ]);
+
+            const cocShaderModule = device.createShaderModule({
+                code: cocCode
+            });
+
+            const bokehShaderModule = device.createShaderModule({
+                code: bokehCode
+            });
+
+            // Create pipelines for both passes
+            cocPipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: {
+                    module: cocShaderModule,
+                    entryPoint: 'main'
+                }
+            });
+
+            blurPipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: {
+                    module: bokehShaderModule,
+                    entryPoint: 'main'
+                }
+            });
+
+            console.log("WebGPU initialized");
+        }
+
+        async function applyBokeh(canvas, focusDepth) {
+            if (!depthData || !originalPixels) {
+                console.error("No depth data or original image available");
+                return;
+            }
+
+            const ctx = canvas.getContext('2d');
+
+            // Create input buffer and copy original pixels to it
+            const inputBuffer = device.createBuffer({
+                size: originalPixels.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+            device.queue.writeBuffer(inputBuffer, 0, originalPixels);
+
+            // Create depth map buffer
+            const depthValues = new Float32Array(depthData.values);
+            const depthBuffer = device.createBuffer({
+                size: depthValues.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+            device.queue.writeBuffer(depthBuffer, 0, depthValues);
+
+            // Create CoC buffer
+            const cocBuffer = device.createBuffer({
+                size: depthValues.byteLength * 4, // float32 for each pixel
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+
+            // Create output buffer
+            const outputBuffer = device.createBuffer({
+                size: originalPixels.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+            });
+
+            // Create dimensions uniform buffer
+            const dimensionsBuffer = device.createBuffer({
+                size: 8,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+            const dimensionsArray = new Uint32Array([canvas.width, canvas.height]);
+            device.queue.writeBuffer(dimensionsBuffer, 0, dimensionsArray);
+
+            // Create params uniform buffer
+            const paramsBuffer = device.createBuffer({
+                size: 12, // 3 floats: focus_depth, max_coc, depth_of_field
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+            const maxCoc = Math.pow(2, parseFloat(blurStrength.value));
+            const paramsArray = new Float32Array([
+                focusDepth,
+                maxCoc,
+                parseFloat(depthOfField.value)
+            ]);
+            device.queue.writeBuffer(paramsBuffer, 0, paramsArray);
+
+            // Create staging buffer for reading back the result
+            const stagingBuffer = device.createBuffer({
+                size: originalPixels.byteLength,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+            });
+
+            // Create bind groups for both passes
+            const cocBindGroup = device.createBindGroup({
+                layout: cocPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: depthBuffer } },
+                    { binding: 1, resource: { buffer: cocBuffer } },
+                    { binding: 2, resource: { buffer: dimensionsBuffer } },
+                    { binding: 3, resource: { buffer: paramsBuffer } },
+                ],
+            });
+
+            const bokehBindGroup = device.createBindGroup({
+                layout: blurPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: inputBuffer } },
+                    { binding: 1, resource: { buffer: outputBuffer } },
+                    { binding: 2, resource: { buffer: dimensionsBuffer } },
+                    { binding: 3, resource: { buffer: cocBuffer } },
+                ],
+            });
+
+            // Create and submit command buffer for both passes
+            const commandEncoder = device.createCommandEncoder();
+
+            // First pass: compute CoC values
+            const cocPass = commandEncoder.beginComputePass();
+            cocPass.setPipeline(cocPipeline);
+            cocPass.setBindGroup(0, cocBindGroup);
+            cocPass.dispatchWorkgroups(
+                Math.ceil(canvas.width / 8),
+                Math.ceil(canvas.height / 8)
+            );
+            cocPass.end();
+
+            // Second pass: apply bokeh blur
+            const bokehPass = commandEncoder.beginComputePass();
+            bokehPass.setPipeline(blurPipeline);
+            bokehPass.setBindGroup(0, bokehBindGroup);
+            bokehPass.dispatchWorkgroups(
+                Math.ceil(canvas.width / 8),
+                Math.ceil(canvas.height / 8)
+            );
+            bokehPass.end();
+
+            // Copy output to staging buffer
+            commandEncoder.copyBufferToBuffer(
+                outputBuffer, 0,
+                stagingBuffer, 0,
+                originalPixels.byteLength
+            );
+
+            device.queue.submit([commandEncoder.finish()]);
+
+            // Read back the result
+            await stagingBuffer.mapAsync(GPUMapMode.READ);
+            const blurredPixels = new Uint8Array(stagingBuffer.getMappedRange());
+            const blurredImageData = new ImageData(
+                new Uint8ClampedArray(blurredPixels),
+                canvas.width,
+                canvas.height
+            );
+            ctx.putImageData(blurredImageData, 0, 0);
+            stagingBuffer.unmap();
+
+            console.log("Bokeh effect applied with focus depth:", focusDepth, "max_coc:", maxCoc, "depth_of_field:", depthOfField.value);
+        }
+
+        function drawImageToCanvas(canvas, img) {
             const ctx = canvas.getContext('2d');
             canvas.width = img.width;
             canvas.height = img.height;
             ctx.drawImage(img, 0, 0);
+
+            // Store original pixels when first drawing the image
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            originalPixels = new Uint32Array(imageData.data.buffer);
+
+            return ctx;
         }
 
-        function visualizeDepthMap(canvas, values, width, height) {
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            const imageData = ctx.createImageData(width, height);
-
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    const value = values[y][x];
-                    const i = (y * width + x) * 4;
-                    // Convert depth value to grayscale
-                    const gray = Math.floor(value * 255);
-                    imageData.data[i] = gray;     // R
-                    imageData.data[i + 1] = gray; // G
-                    imageData.data[i + 2] = gray; // B
-                    imageData.data[i + 3] = 255;  // A
-                }
+        // Add event listeners for the sliders to reapply effect when changed
+        let lastClickedPos = null;
+        function updateEffect() {
+            if (lastClickedPos) {
+                const { x, y } = lastClickedPos;
+                const index = y * depthData.width + x;
+                const depth = depthData.values[index];
+                applyBokeh(originalCanvas, depth);
             }
-
-            ctx.putImageData(imageData, 0, 0);
         }
 
-        function getMousePos(canvas, event) {
-            const rect = canvas.getBoundingClientRect();
-            const scaleX = canvas.width / rect.width;
-            const scaleY = canvas.height / rect.height;
-            return {
-                x: Math.floor((event.clientX - rect.left) * scaleX),
-                y: Math.floor((event.clientY - rect.top) * scaleY)
-            };
-        }
+        blurStrength.addEventListener('input', updateEffect);
+        depthOfField.addEventListener('input', updateEffect);
 
-        originalCanvas.addEventListener('mousemove', (e) => {
+        originalCanvas.addEventListener('click', async (event) => {
             if (!depthData) return;
 
-            const pos = getMousePos(originalCanvas, e);
-            if (pos.x >= 0 && pos.x < depthData.width &&
-                pos.y >= 0 && pos.y < depthData.height) {
-                const depth = depthData.values[pos.y][pos.x];
-                depthValue.style.display = 'block';
-                depthValue.style.left = (e.pageX + 10) + 'px';
-                depthValue.style.top = (e.pageY + 10) + 'px';
-                depthValue.textContent = `Depth: ${depth.toFixed(3)}`;
-            }
+            const rect = originalCanvas.getBoundingClientRect();
+            const scaleX = originalCanvas.width / rect.width;
+            const scaleY = originalCanvas.height / rect.height;
+
+            const x = Math.floor((event.clientX - rect.left) * scaleX);
+            const y = Math.floor((event.clientY - rect.top) * scaleY);
+
+            // Update click indicator position
+            clickIndicator.style.display = 'block';
+            clickIndicator.style.left = (event.clientX - rect.left) + 'px';
+            clickIndicator.style.top = (event.clientY - rect.top) + 'px';
+
+            lastClickedPos = { x, y };
+            const index = y * depthData.width + x;
+            const depth = depthData.values[index];
+
+            console.log(`Depth at (${x}, ${y}): ${depth.toFixed(3)}`);
+            await applyBokeh(originalCanvas, depth);
         });
 
-        originalCanvas.addEventListener('mouseout', () => {
-            depthValue.style.display = 'none';
-        });
+        // Initialize WebGPU when the page loads
+        initWebGPU().catch(console.error);
 
-        upload.addEventListener('change', async (e) => {
-            const file = e.target.files[0];
+        imageUpload.addEventListener('change', async (event) => {
+            const file = event.target.files[0];
             if (!file) return;
 
-            // Draw original image
-            const img = new Image();
-            img.src = URL.createObjectURL(file);
-            await new Promise(resolve => img.onload = resolve);
-            drawImage(originalCanvas, img);
+            loadingOverlay.style.display = 'flex';
 
-            // Upload and get depth map
+            // Create a new image but don't display it yet
+            originalImage = new Image();
+            originalImage.src = URL.createObjectURL(file);
+
             const formData = new FormData();
             formData.append('image', file);
 
@@ -170,15 +380,18 @@
                 });
 
                 if (!response.ok) {
-                    throw new Error('Failed to generate depth map');
+                    throw new Error('Upload failed');
                 }
 
                 const data = await response.json();
                 depthData = data.depth_map;
-                visualizeDepthMap(depthCanvas, depthData.values, depthData.width, depthData.height);
+
             } catch (error) {
                 console.error('Error:', error);
-                alert('Failed to generate depth map');
+                alert('Failed to process image. Please try again.');
+            } finally {
+                loadingOverlay.style.display = 'none';
+                drawImageToCanvas(originalCanvas, originalImage);
             }
         });
     </script>

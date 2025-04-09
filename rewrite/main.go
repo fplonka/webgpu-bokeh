@@ -1,3 +1,5 @@
+// Package main implements a web server that generates background blur effects using
+// the Depth Anything v2 model from Hugging Face for depth estimation.
 package main
 
 import (
@@ -23,16 +25,21 @@ import (
 )
 
 const (
+	// Hugging Face Space endpoint for the Depth Anything v2 model
 	apiBaseURL   = "https://depth-anything-depth-anything-v2.hf.space"
 	pollTimeout  = 30 * time.Second
 	pollInterval = 2 * time.Second
 	maxFileSize  = 10 << 20 // 10 MB
 
-	// Response array indices for different outputs
-	depthMapIndex = 1 // 0: slider view, 1: grayscale, 2: 16-bit raw
+	// Index for grayscale depth map in the model's output array
+	// (0: slider view, 1: grayscale, 2: 16-bit raw)
+	depthMapIndex = 1
 )
 
-// API request/response types
+// Types for interacting with the Hugging Face Spaces API.
+// The API uses a two-phase process:
+// 1. Upload file and get event ID
+// 2. Poll for results using event ID
 type (
 	uploadResponse []string
 
@@ -51,10 +58,12 @@ type (
 )
 
 func init() {
+	// Configure structured JSON logging for better observability
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 }
 
-// uploadToHF uploads an image to the HF server and returns its path
+// uploadToHF sends an image to the Hugging Face server using multipart form data.
+// Returns the server-side path where the image was stored.
 func uploadToHF(imageBytes []byte, filename string) (string, error) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
@@ -94,7 +103,8 @@ func uploadToHF(imageBytes []byte, filename string) (string, error) {
 	return result[0], nil
 }
 
-// getEventID makes the initial API call and returns an event ID for polling
+// getEventID initiates depth map generation for an uploaded image.
+// Returns an event ID used to poll for results.
 func getEventID(uploadedPath string) (string, error) {
 	reqData := apiRequest{
 		Data: []fileData{{
@@ -129,8 +139,9 @@ func getEventID(uploadedPath string) (string, error) {
 	return result.EventID, nil
 }
 
-// pollForResult polls the API until we get a complete response or timeout
-func pollForResult(eventID string) ([]byte, error) {
+// pollForResult waits for depth map generation to complete, with a 30s timeout.
+// Returns normalized depth values (0-1) and image dimensions.
+func pollForResult(eventID string) ([]float32, int, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
 	defer cancel()
 
@@ -140,22 +151,22 @@ func pollForResult(eventID string) ([]byte, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("polling timed out after %v", pollTimeout)
+			return nil, 0, 0, fmt.Errorf("polling timed out after %v", pollTimeout)
 		case <-ticker.C:
 			resp, err := http.Get(fmt.Sprintf("%s/call/on_submit/%s", apiBaseURL, eventID))
 			if err != nil {
-				return nil, fmt.Errorf("polling request failed: %w", err)
+				return nil, 0, 0, fmt.Errorf("polling request failed: %w", err)
 			}
 
 			body, err := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if err != nil {
-				return nil, fmt.Errorf("read polling response: %w", err)
+				return nil, 0, 0, fmt.Errorf("read polling response: %w", err)
 			}
 
 			bodyStr := string(body)
 			if bodyStr == "event: error\ndata: null\n\n" {
-				return nil, fmt.Errorf("API returned error")
+				return nil, 0, 0, fmt.Errorf("API returned error")
 			}
 			if bodyStr == "" || !strings.HasPrefix(bodyStr, "event: complete") {
 				continue
@@ -205,28 +216,19 @@ func extractDepthMapURL(result []interface{}) (string, error) {
 	return url, nil
 }
 
-// downloadDepthMap downloads the depth map from the given URL
-func downloadDepthMap(url string) ([]byte, error) {
+// downloadDepthMap retrieves and processes the depth map PNG.
+// Converts grayscale PNG values to normalized floats (0-1) for WebGPU processing.
+func downloadDepthMap(url string) ([]float32, int, int, error) {
 	resp, err := http.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("download failed: %w", err)
+		return nil, 0, 0, fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	// Read the PNG data
+	img, err := png.Decode(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read depth map: %w", err)
-	}
-
-	slog.Info("downloaded depth map", "size", len(data))
-	return data, nil
-}
-
-// parseDepthMap converts the PNG depth map into a 2D array of float values
-func parseDepthMap(data []byte) ([][]float64, error) {
-	img, err := png.Decode(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("decode depth map PNG: %w", err)
+		return nil, 0, 0, fmt.Errorf("decode PNG: %w", err)
 	}
 
 	bounds := img.Bounds()
@@ -234,50 +236,46 @@ func parseDepthMap(data []byte) ([][]float64, error) {
 	height := bounds.Max.Y - bounds.Min.Y
 
 	// Convert to grayscale values
-	values := make([][]float64, height)
+	values := make([]float32, width*height)
 	for y := 0; y < height; y++ {
-		values[y] = make([]float64, width)
 		for x := 0; x < width; x++ {
 			r, _, _, _ := img.At(x, y).RGBA()
 			// Convert from 0-65535 to 0-1 range
-			values[y][x] = float64(r) / 65535.0
+			values[y*width+x] = float32(r) / 65535.0
 		}
 	}
 
-	return values, nil
+	slog.Info("processed depth map", "width", width, "height", height)
+	return values, width, height, nil
 }
 
-// fetchDepthMap orchestrates the entire process of getting a depth map
-func fetchDepthMap(imageBytes []byte) ([]byte, error) {
+// fetchDepthMap coordinates the full depth map generation process:
+// upload → initiate → poll → download → process
+func fetchDepthMap(imageBytes []byte) ([]float32, int, int, error) {
 	uploadedPath, err := uploadToHF(imageBytes, "image.jpg")
 	if err != nil {
-		return nil, fmt.Errorf("upload failed: %w", err)
+		return nil, 0, 0, fmt.Errorf("upload failed: %w", err)
 	}
 
 	eventID, err := getEventID(uploadedPath)
 	if err != nil {
-		return nil, fmt.Errorf("get event ID failed: %w", err)
+		return nil, 0, 0, fmt.Errorf("get event ID failed: %w", err)
 	}
 
-	depthMap, err := pollForResult(eventID)
+	values, width, height, err := pollForResult(eventID)
 	if err != nil {
-		return nil, fmt.Errorf("polling failed: %w", err)
+		return nil, 0, 0, fmt.Errorf("polling failed: %w", err)
 	}
 
-	return depthMap, nil
+	return values, width, height, nil
 }
 
+// handleUpload processes image uploads, generates depth maps via Hugging Face,
+// and returns normalized depth values for WebGPU-based background blur.
 func handleUpload(w http.ResponseWriter, r *http.Request) {
-	// Set CORS headers
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-	// Handle preflight requests
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -308,27 +306,19 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify image format
-	img, format, err := image.Decode(bytes.NewReader(fileBytes))
-	if err != nil {
+	if _, format, err := image.Decode(bytes.NewReader(fileBytes)); err != nil {
 		slog.Error("failed to decode image", "format", format, "error", err)
 		http.Error(w, "Failed to decode image", http.StatusBadRequest)
 		return
+	} else {
+		slog.Info("decoded image", "format", format)
 	}
-	slog.Info("decoded image", "format", format)
 
 	// Fetch depth map from Hugging Face
-	depthMapBytes, err := fetchDepthMap(fileBytes)
+	depthValues, width, height, err := fetchDepthMap(fileBytes)
 	if err != nil {
 		slog.Error("failed to fetch depth map", "error", err)
 		http.Error(w, "Failed to generate depth map", http.StatusInternalServerError)
-		return
-	}
-
-	// Parse depth map into 2D array
-	depthValues, err := parseDepthMap(depthMapBytes)
-	if err != nil {
-		slog.Error("failed to parse depth map", "error", err)
-		http.Error(w, "Failed to parse depth map", http.StatusInternalServerError)
 		return
 	}
 
@@ -338,8 +328,8 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"depth_map": map[string]interface{}{
 			"values": depthValues,
-			"width":  img.Bounds().Max.X - img.Bounds().Min.X,
-			"height": img.Bounds().Max.Y - img.Bounds().Min.Y,
+			"width":  width,
+			"height": height,
 		},
 	}
 
@@ -349,10 +339,10 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Serve static files
+	// Serve WebGPU shaders and frontend from /static
 	http.Handle("/", http.FileServer(http.Dir("static")))
 
-	// Handle image upload and depth map generation
+	// REST endpoint for depth map generation
 	http.HandleFunc("/api/upload", handleUpload)
 
 	slog.Info("server starting", "addr", "http://localhost:8080")
