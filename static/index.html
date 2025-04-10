@@ -99,6 +99,7 @@
                         <select id="bokehShape" class="rounded border border-gray-300 px-2 py-1" disabled>
                             <option value="circle">Circle</option>
                             <option value="square">Square</option>
+                            <option value="hexagon">Hexagon</option>
                         </select>
                     </div>
                     <div class="flex items-center gap-4">
@@ -228,7 +229,11 @@
                 size: 16, // 3 u32s (width, height, shape) + padding to 16 bytes
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
-            const shaderParamsArray = new Uint32Array([canvas.width, canvas.height, bokehShape.value === 'square' ? 1 : 0, 0]); // last 0 is padding
+            // Convert shape value to uint: 0 = circle, 1 = square, 2 = hexagon
+            let shapeValue = 0;
+            if (bokehShape.value === 'square') shapeValue = 1;
+            else if (bokehShape.value === 'hexagon') shapeValue = 2;
+            const shaderParamsArray = new Uint32Array([canvas.width, canvas.height, shapeValue, 0]); // last 0 is padding
             device.queue.writeBuffer(shaderParamsBuffer, 0, shaderParamsArray);
 
             // Create CoC params uniform buffer
@@ -236,7 +241,7 @@
                 size: 16, // 4 floats: focus_depth, max_coc, depth_of_field, background_only
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
-            const maxCoc = Math.pow(2, parseFloat(blurStrength.value));
+            const maxCoc = 0.001 * 0.5 * (canvas.width + canvas.height) * Math.pow(2, parseFloat(blurStrength.value));
             const cocParamsArray = new Float32Array([
                 focusDepth,
                 maxCoc,

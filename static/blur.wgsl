@@ -1,7 +1,7 @@
 struct Params {
     width: u32,
     height: u32,
-    shape: u32,  // 0 = circle, 1 = square
+    shape: u32,  // 0 = circle, 1 = square, 2 = hexagon
 }
 
 @group(0) @binding(0) var<storage, read> inputImage: array<u32>;
@@ -87,13 +87,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             
             // Distance based on shape
             var dist: f32;
+            let fdx = f32(dx);
+            let fdy = f32(dy);
+            
+            var isInShape = false;
             if params.shape == 0u { // circle
-                dist = sqrt(f32(dx * dx + dy * dy));
-            } else { // square
-                dist = max(abs(f32(dx)), abs(f32(dy)));
+                dist = sqrt(fdx * fdx + fdy * fdy);
+                isInShape = dist <= sampleCoC;
+            } else if params.shape == 1u { // square
+                dist = max(abs(fdx), abs(fdy));
+                isInShape = dist <= sampleCoC;
+            } else { // hexagon
+                // For unit hexagon (r=1), check if point is inside using the formula:
+                // √3 * |x| + |y| <= √3
+                // Scale by sampleCoC to get desired size
+                let ax = abs(fdx / sampleCoC);
+                let ay = abs(fdy / sampleCoC);
+                isInShape = (1.732051 * ax + ay) <= 1.732051; // √3 ≈ 1.732051
             }
 
-            if dist > sampleCoC {
+            if !isInShape {
                 continue;
             }
             

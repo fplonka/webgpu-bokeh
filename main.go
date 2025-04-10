@@ -142,6 +142,7 @@ func getEventID(uploadedPath string) (string, error) {
 // pollForResult waits for depth map generation to complete, with a 30s timeout.
 // Returns normalized depth values (0-1) and image dimensions.
 func pollForResult(eventID string) ([]float32, int, int, error) {
+	slog.Info("starting to poll for result", "event_id", eventID)
 	ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
 	defer cancel()
 
@@ -151,24 +152,30 @@ func pollForResult(eventID string) ([]float32, int, int, error) {
 	for {
 		select {
 		case <-ctx.Done():
+			slog.Error("polling timed out", "event_id", eventID, "timeout", pollTimeout)
 			return nil, 0, 0, fmt.Errorf("polling timed out after %v", pollTimeout)
 		case <-ticker.C:
+			slog.Debug("polling API", "event_id", eventID)
 			resp, err := http.Get(fmt.Sprintf("%s/call/on_submit/%s", apiBaseURL, eventID))
 			if err != nil {
+				slog.Error("polling request failed", "event_id", eventID, "error", err)
 				return nil, 0, 0, fmt.Errorf("polling request failed: %w", err)
 			}
 
 			body, err := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if err != nil {
+				slog.Error("failed to read polling response", "event_id", eventID, "error", err)
 				return nil, 0, 0, fmt.Errorf("read polling response: %w", err)
 			}
 
 			bodyStr := string(body)
 			if bodyStr == "event: error\ndata: null\n\n" {
+				slog.Error("API returned error response", "event_id", eventID)
 				return nil, 0, 0, fmt.Errorf("API returned error")
 			}
 			if bodyStr == "" || !strings.HasPrefix(bodyStr, "event: complete") {
+				slog.Debug("received incomplete response", "event_id", eventID, "response", bodyStr)
 				continue
 			}
 
@@ -183,14 +190,18 @@ func pollForResult(eventID string) ([]float32, int, int, error) {
 			jsonStr := strings.Join(dataLines, "")
 			var result []interface{}
 			if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-				slog.Warn("failed to parse response JSON", "error", err)
+				slog.Warn("failed to parse response JSON", "event_id", eventID, "error", err)
 				continue
 			}
 
 			// Get depth map URL and download it
-			if depthMapURL, err := extractDepthMapURL(result); err == nil {
-				return downloadDepthMap(depthMapURL)
+			depthMapURL, err := extractDepthMapURL(result)
+			if err != nil {
+				slog.Debug("failed to extract depth map URL", "event_id", eventID, "error", err)
+				continue
 			}
+			slog.Info("got depth map URL", "event_id", eventID, "url", depthMapURL)
+			return downloadDepthMap(depthMapURL)
 		}
 	}
 }

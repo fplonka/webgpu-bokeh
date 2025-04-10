@@ -11,9 +11,14 @@ struct Params {
 }
 
 fn calculate_coc_radius(pixel_depth: f32, focal_depth: f32) -> f32 {
-    let dist = focal_depth - pixel_depth;
-    let use_dist = select(abs(dist), dist, params.background_only != 0u);
-    return params.max_coc * max(use_dist - params.depth_of_field / 2.0, 0.0);
+    if (params.background_only != 0u && pixel_depth >= focal_depth) {
+        return 0;
+    }
+    // TRADER MATH DO NOT TOUCH LOL
+    var dist = focal_depth - pixel_depth;
+    let a = 2 / (2 - params.depth_of_field);
+    let b = 1 - a;
+    return params.max_coc * max(abs(a*(dist + params.depth_of_field / 2) + b) + b, 0.0);
 }
 
 @compute @workgroup_size(8, 8)
