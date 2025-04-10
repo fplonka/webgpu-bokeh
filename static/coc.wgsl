@@ -7,10 +7,13 @@ struct Params {
     focus_depth: f32,
     max_coc: f32,
     depth_of_field: f32,
+    background_only: u32,  // 0 = blur all, 1 = blur background only
 }
 
 fn calculate_coc_radius(pixel_depth: f32, focal_depth: f32) -> f32 {
-    return params.max_coc * max(abs(focal_depth - pixel_depth) - params.depth_of_field / 2.0, 0.0);
+    let dist = focal_depth - pixel_depth;
+    let use_dist = select(abs(dist), dist, params.background_only != 0u);
+    return params.max_coc * max(use_dist - params.depth_of_field / 2.0, 0.0);
 }
 
 @compute @workgroup_size(8, 8)

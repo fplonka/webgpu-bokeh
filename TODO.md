@@ -1,0 +1,8 @@
+- black sliders?
+- better indicator than red dot
+- fix on firefox
+- info for when webgpu is not supported
+- choose square/red/triangle?? bokeh
+- math for adding rgb? should be in linear space?
+    - todo: verify
+- partial overlap weight in blur
