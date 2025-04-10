@@ -7,10 +7,14 @@ web app for background blur using depth estimation and webgpu
 - go 1.21+
 - tailwind cli
 - browser with webgpu support
+- replicate api token
 
 ## setup
 
 ```sh
+# set api token
+export REPLICATE_API_TOKEN=your_token_here
+
 # start tailwind watcher
 tailwindcss -i ./static/input.css -o ./static/output.css --watch
 
@@ -24,10 +28,9 @@ server runs on :8080 by default
 
 ### backend (go)
 
-- uses hugging face depth-anything-v2 api
-- two-phase depth estimation:
-  1. upload image, get event_id
-  2. poll for results (30s timeout)
+- uses replicate depth-anything-v2 api
+- single-phase depth estimation:
+  1. call api with base64 image, poll for results (30s timeout)
 - processes depth map:
   - downloads grayscale png
   - normalizes to float32 (0-1)

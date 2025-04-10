@@ -1,10 +1,10 @@
 // Package main implements a web server that generates background blur effects using
-// the Depth Anything v2 model from Hugging Face for depth estimation.
+// the Depth Anything v2 model from Replicate for depth estimation.
 package main
 
 import (
 	"bytes"
-	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -14,10 +14,8 @@ import (
 	_ "image/png"
 	"io"
 	"log/slog"
-	"mime/multipart"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	_ "golang.org/x/image/tiff"
@@ -25,206 +23,139 @@ import (
 )
 
 const (
-	// Hugging Face Space endpoint for the Depth Anything v2 model
-	apiBaseURL   = "https://depth-anything-depth-anything-v2.hf.space"
+	apiBaseURL   = "https://api.replicate.com/v1/predictions"
+	modelVersion = "b239ea33cff32bb7abb5db39ffe9a09c14cbc2894331d1ef66fe096eed88ebd4"
 	pollTimeout  = 30 * time.Second
 	pollInterval = 2 * time.Second
 	maxFileSize  = 10 << 20 // 10 MB
-
-	// Index for grayscale depth map in the model's output array
-	// (0: slider view, 1: grayscale, 2: 16-bit raw)
-	depthMapIndex = 1
 )
 
-// Types for interacting with the Hugging Face Spaces API.
-// The API uses a two-phase process:
-// 1. Upload file and get event ID
-// 2. Poll for results using event ID
+// Types for interacting with the Replicate API
 type (
-	uploadResponse []string
-
-	eventIDResponse struct {
-		EventID string `json:"event_id"`
+	replicateRequest struct {
+		Version string `json:"version"`
+		Input   struct {
+			Image string `json:"image"`
+		} `json:"input"`
 	}
 
-	fileData struct {
-		Path string            `json:"path"`
-		Meta map[string]string `json:"meta"`
-	}
-
-	apiRequest struct {
-		Data []fileData `json:"data"`
+	replicateResponse struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+		Output struct {
+			GreyDepth string `json:"grey_depth"`
+		} `json:"output"`
+		Error *string `json:"error"`
 	}
 )
 
 func init() {
 	// Configure structured JSON logging for better observability
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
+	// Ensure REPLICATE_API_TOKEN is set
+	if os.Getenv("REPLICATE_API_TOKEN") == "" {
+		slog.Error("REPLICATE_API_TOKEN environment variable not set")
+		os.Exit(1)
+	}
 }
 
-// uploadToHF sends an image to the Hugging Face server using multipart form data.
-// Returns the server-side path where the image was stored.
-func uploadToHF(imageBytes []byte, filename string) (string, error) {
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
+// callReplicate sends an image to the Replicate API and initiates depth map generation.
+// Returns a prediction ID used to poll for results.
+func callReplicate(imageBytes []byte) (string, error) {
+	// Convert image to base64
+	base64Image := base64.StdEncoding.EncodeToString(imageBytes)
 
-	part, err := writer.CreateFormFile("files", filename)
-	if err != nil {
-		return "", fmt.Errorf("create form file: %w", err)
+	// Prepare request
+	request := replicateRequest{
+		Version: modelVersion,
+		Input: struct {
+			Image string `json:"image"`
+		}{
+			Image: "data:image/jpeg;base64," + base64Image,
+		},
 	}
 
-	if _, err := part.Write(imageBytes); err != nil {
-		return "", fmt.Errorf("write image bytes: %w", err)
-	}
-	writer.Close()
-
-	req, err := http.NewRequest("POST", apiBaseURL+"/upload", &buf)
-	if err != nil {
-		return "", fmt.Errorf("create upload request: %w", err)
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("upload request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result uploadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode upload response: %w", err)
-	}
-
-	if len(result) == 0 {
-		return "", fmt.Errorf("empty upload response")
-	}
-
-	slog.Info("uploaded image", "path", result[0])
-	return result[0], nil
-}
-
-// getEventID initiates depth map generation for an uploaded image.
-// Returns an event ID used to poll for results.
-func getEventID(uploadedPath string) (string, error) {
-	reqData := apiRequest{
-		Data: []fileData{{
-			Path: uploadedPath,
-			Meta: map[string]string{"_type": "gradio.FileData"},
-		}},
-	}
-
-	reqBody, err := json.Marshal(reqData)
+	body, err := json.Marshal(request)
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", apiBaseURL+"/call/on_submit", bytes.NewBuffer(reqBody))
+	req, err := http.NewRequest("POST", apiBaseURL, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("create API request: %w", err)
+		return "", fmt.Errorf("create request: %w", err)
 	}
+
+	// Add required headers
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("REPLICATE_API_TOKEN"))
+	req.Header.Set("Prefer", "wait")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("API request failed: %w", err)
+		return "", fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	var result eventIDResponse
+	var result replicateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode event ID response: %w", err)
+		return "", fmt.Errorf("decode response: %w", err)
 	}
 
-	slog.Info("got event ID", "id", result.EventID)
-	return result.EventID, nil
+	if result.Error != nil {
+		return "", fmt.Errorf("api error: %s", *result.Error)
+	}
+
+	slog.Info("created prediction", "id", result.ID)
+	return result.ID, nil
 }
 
 // pollForResult waits for depth map generation to complete, with a 30s timeout.
 // Returns normalized depth values (0-1) and image dimensions.
-func pollForResult(eventID string) ([]float32, int, int, error) {
-	slog.Info("starting to poll for result", "event_id", eventID)
-	ctx, cancel := context.WithTimeout(context.Background(), pollTimeout)
-	defer cancel()
+func pollForResult(predictionID string) ([]float32, int, int, error) {
+	slog.Info("starting to poll for result", "prediction_id", predictionID)
+	endTime := time.Now().Add(pollTimeout)
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			slog.Error("polling timed out", "event_id", eventID, "timeout", pollTimeout)
-			return nil, 0, 0, fmt.Errorf("polling timed out after %v", pollTimeout)
-		case <-ticker.C:
-			slog.Debug("polling API", "event_id", eventID)
-			resp, err := http.Get(fmt.Sprintf("%s/call/on_submit/%s", apiBaseURL, eventID))
-			if err != nil {
-				slog.Error("polling request failed", "event_id", eventID, "error", err)
-				return nil, 0, 0, fmt.Errorf("polling request failed: %w", err)
-			}
+	for time.Now().Before(endTime) {
+		req, err := http.NewRequest("GET", apiBaseURL+"/"+predictionID, nil)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("create status request: %w", err)
+		}
 
-			body, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				slog.Error("failed to read polling response", "event_id", eventID, "error", err)
-				return nil, 0, 0, fmt.Errorf("read polling response: %w", err)
-			}
+		req.Header.Set("Authorization", "Bearer "+os.Getenv("REPLICATE_API_TOKEN"))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("status request failed: %w", err)
+		}
+		defer resp.Body.Close()
 
-			bodyStr := string(body)
-			if bodyStr == "event: error\ndata: null\n\n" {
-				slog.Error("API returned error response", "event_id", eventID)
-				return nil, 0, 0, fmt.Errorf("API returned error")
-			}
-			if bodyStr == "" || !strings.HasPrefix(bodyStr, "event: complete") {
-				slog.Debug("received incomplete response", "event_id", eventID, "response", bodyStr)
-				continue
-			}
+		var result replicateResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return nil, 0, 0, fmt.Errorf("decode status response: %w", err)
+		}
 
-			// Extract and combine data lines
-			var dataLines []string
-			for _, line := range strings.Split(bodyStr, "\n") {
-				if strings.HasPrefix(line, "data: ") {
-					dataLines = append(dataLines, strings.TrimPrefix(line, "data: "))
-				}
-			}
+		if result.Error != nil {
+			return nil, 0, 0, fmt.Errorf("api error: %s", *result.Error)
+		}
 
-			jsonStr := strings.Join(dataLines, "")
-			var result []interface{}
-			if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-				slog.Warn("failed to parse response JSON", "event_id", eventID, "error", err)
-				continue
-			}
-
-			// Get depth map URL and download it
-			depthMapURL, err := extractDepthMapURL(result)
-			if err != nil {
-				slog.Debug("failed to extract depth map URL", "event_id", eventID, "error", err)
-				continue
-			}
-			slog.Info("got depth map URL", "event_id", eventID, "url", depthMapURL)
-			return downloadDepthMap(depthMapURL)
+		switch result.Status {
+		case "succeeded":
+			slog.Info("prediction succeeded", "prediction_id", predictionID)
+			return downloadDepthMap(result.Output.GreyDepth)
+		case "failed":
+			slog.Error("prediction failed", "prediction_id", predictionID)
+			return nil, 0, 0, fmt.Errorf("prediction failed")
+		default:
+			slog.Debug("prediction in progress", "prediction_id", predictionID, "status", result.Status)
+			<-ticker.C
 		}
 	}
-}
 
-// extractDepthMapURL gets the depth map URL from the response
-func extractDepthMapURL(result []interface{}) (string, error) {
-	if len(result) <= depthMapIndex {
-		return "", fmt.Errorf("response too short: %d elements", len(result))
-	}
-
-	depthMap, ok := result[depthMapIndex].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("invalid depth map data at index %d", depthMapIndex)
-	}
-
-	path, ok := depthMap["path"].(string)
-	if !ok {
-		return "", fmt.Errorf("no path in depth map data")
-	}
-
-	url := fmt.Sprintf("%s/file=%s", apiBaseURL, path)
-	slog.Info("got depth map URL", "url", url)
-	return url, nil
+	slog.Error("polling timed out", "prediction_id", predictionID, "timeout", pollTimeout)
+	return nil, 0, 0, fmt.Errorf("timeout waiting for depth map")
 }
 
 // downloadDepthMap retrieves and processes the depth map PNG.
@@ -261,27 +192,19 @@ func downloadDepthMap(url string) ([]float32, int, int, error) {
 }
 
 // fetchDepthMap coordinates the full depth map generation process:
-// upload → initiate → poll → download → process
+// call replicate → poll → download → process
 func fetchDepthMap(imageBytes []byte) ([]float32, int, int, error) {
-	uploadedPath, err := uploadToHF(imageBytes, "image.jpg")
+	// Call Replicate API and get prediction ID
+	predictionID, err := callReplicate(imageBytes)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("upload failed: %w", err)
+		return nil, 0, 0, fmt.Errorf("call replicate: %w", err)
 	}
 
-	eventID, err := getEventID(uploadedPath)
-	if err != nil {
-		return nil, 0, 0, fmt.Errorf("get event ID failed: %w", err)
-	}
-
-	values, width, height, err := pollForResult(eventID)
-	if err != nil {
-		return nil, 0, 0, fmt.Errorf("polling failed: %w", err)
-	}
-
-	return values, width, height, nil
+	// Poll for result and return depth map data
+	return pollForResult(predictionID)
 }
 
-// handleUpload processes image uploads, generates depth maps via Hugging Face,
+// handleUpload processes image uploads, generates depth maps via Replicate,
 // and returns normalized depth values for WebGPU-based background blur.
 func handleUpload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -325,7 +248,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		slog.Info("decoded image", "format", format)
 	}
 
-	// Fetch depth map from Hugging Face
+	// Fetch depth map from Replicate
 	depthValues, width, height, err := fetchDepthMap(fileBytes)
 	if err != nil {
 		slog.Error("failed to fetch depth map", "error", err)
