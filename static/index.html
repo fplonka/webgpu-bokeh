@@ -75,7 +75,7 @@
                 </div>
 
                 <div id="statusText" class="mt-2 h-6 block text-zinc-500">
-                    click anywhere on the image to set focus point
+                    Loading depth model, please wait...
                 </div>
 
                 <div class="mt-6 space-y-4">
@@ -111,7 +111,26 @@
         </div>
     </div>
 
-    <script>
+    <script type="module">
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.2/dist/transformers.min.js';
+
+        let originalImage = null;
+        let depthData = null;
+
+        // Start loading the depth model
+        let depthEstimator = null;
+        let modelLoading = true;
+        pipeline('depth-estimation', 'onnx-community/depth-anything-v2-base', {
+            device: 'webgpu',
+        }).then(model => {
+            depthEstimator = model;
+            modelLoading = false;
+            updateStatus('Click anywhere on the image to set focus point.');
+        }).catch(error => {
+            console.error('Error loading model:', error);
+            updateStatus('Error loading model. Please refresh the page.');
+        });
+
         const imageUpload = document.getElementById('imageUpload');
         const originalCanvas = document.getElementById('originalCanvas');
         const loadingOverlay = document.getElementById('loadingOverlay');
@@ -123,9 +142,8 @@
         const backgroundOnly = document.getElementById('backgroundOnly');
         const clickIndicator = document.getElementById('clickIndicator');
 
-        let depthData = null;
-        let originalImage = null;
         let device = null;
+        let cocPipeline = null;
         let blurPipeline = null;
         let originalPixels = null;
 
@@ -153,7 +171,12 @@
                 throw new Error("No GPU adapter found");
             }
 
-            device = await adapter.requestDevice();
+            device = await adapter.requestDevice({
+                requiredLimits: {
+                    maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+                    maxBufferSize: adapter.limits.maxBufferSize
+                }
+            });
 
             // Load and compile both shaders
             const [cocCode, bokehCode] = await Promise.all([
@@ -351,18 +374,30 @@
         // Add event listeners for the sliders to reapply effect when changed
         let lastClickedPos = null;
         let updateTimer = null;
+        let isProcessing = false;
 
         async function updateEffect() {
-            if (!lastClickedPos) return;
+            console.log("isProcessing:", isProcessing);
+            if (!lastClickedPos || isProcessing) return;
 
-            updateStatus('processing...');
-            const { x, y } = lastClickedPos;
-            const index = y * depthData.width + x;
-            const depth = depthData.values[index];
-            await applyBokeh(originalCanvas, depth);
-            updateStatus('processing...', false);
+            try {
+                isProcessing = true;
+                updateStatus('processing...');
+                const { x, y } = lastClickedPos;
+                const index = y * depthData.width + x;
+                const depth = depthData.values[index];
+
+                await applyBokeh(originalCanvas, depth);
+                updateStatus('processing...', false);
+            } catch (error) {
+                console.error('Error applying bokeh:', error);
+                updateStatus('error applying effect', true);
+            } finally {
+                isProcessing = false;
+            }
         }
 
+        // so that scrollbar thing doesn't update a trillion times
         function debouncedUpdate() {
             clearTimeout(updateTimer);
             updateTimer = setTimeout(updateEffect, 50);
@@ -374,7 +409,9 @@
         backgroundOnly.addEventListener('change', debouncedUpdate);
 
         originalCanvas.addEventListener('click', async (event) => {
-            if (!depthData) return;
+            console.log("isProcessing:", isProcessing);
+            if (!depthData || isProcessing) return;
+            isProcessing = true;
 
             const rect = originalCanvas.getBoundingClientRect();
             const scaleX = originalCanvas.width / rect.width;
@@ -396,6 +433,7 @@
             updateStatus('processing...');
             await applyBokeh(originalCanvas, depth);
             updateStatus('processing...', false);
+            isProcessing = false;
             setControlsEnabled(true);
         });
 
@@ -407,33 +445,42 @@
             if (!file) return;
 
             loadingOverlay.style.display = 'flex';
-
-            // Create a new image but don't display it yet
-            originalImage = new Image();
-            originalImage.src = URL.createObjectURL(file);
-
-            const formData = new FormData();
-            formData.append('image', file);
+            updateStatus('Loading image...');
 
             try {
-                const response = await fetch('/api/upload', {
-                    method: 'POST',
-                    body: formData
-                });
+                // Create a new image but don't display it yet
+                originalImage = new Image();
+                originalImage.src = URL.createObjectURL(file);
 
-                if (!response.ok) {
-                    throw new Error('Upload failed');
+                // Wait for image to load
+                await new Promise(r => originalImage.onload = r);
+                drawImageToCanvas(originalCanvas, originalImage);
+
+                // Wait for model if still loading
+                if (modelLoading) {
+                    while (modelLoading) {
+                        await new Promise(r => setTimeout(r, 100));
+                    }
                 }
 
-                const data = await response.json();
-                depthData = data.depth_map;
+                // Get depth map
+                updateStatus('Estimating depth...');
+                const result = await depthEstimator(originalImage.src);
 
+                // Convert depth map to our format
+                depthData = {
+                    width: result.depth.width,
+                    height: result.depth.height,
+                    values: new Float32Array(result.depth.data).map(v => v / 255)
+                };
+
+                updateStatus('Ready! Click anywhere to set focus point.');
             } catch (error) {
                 console.error('Error:', error);
                 alert('Failed to process image. Please try again.');
+                updateStatus('Error processing image');
             } finally {
                 loadingOverlay.style.display = 'none';
-                drawImageToCanvas(originalCanvas, originalImage);
             }
         });
     </script>

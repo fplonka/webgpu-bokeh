@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -14,6 +13,7 @@ import (
 	_ "image/png"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"time"
@@ -60,19 +60,63 @@ func init() {
 	}
 }
 
+// TODO: when deployed remove this, and just save the img to static/images/UUID and return that path
+func uploadToHF(imageBytes []byte, filename string) (string, error) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	part, err := writer.CreateFormFile("files", filename)
+	if err != nil {
+		return "", fmt.Errorf("create form file: %w", err)
+	}
+
+	if _, err := part.Write(imageBytes); err != nil {
+		return "", fmt.Errorf("write image bytes: %w", err)
+	}
+	writer.Close()
+
+	req, err := http.NewRequest("POST", "https://depth-anything-depth-anything-v2.hf.space/upload", &buf)
+	if err != nil {
+		return "", fmt.Errorf("create upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("upload request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result []string
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode upload response: %w", err)
+	}
+
+	if len(result) == 0 {
+		return "", fmt.Errorf("empty upload response")
+	}
+
+	slog.Info("uploaded image", "path", result[0])
+	return result[0], nil
+}
+
 // callReplicate sends an image to the Replicate API and initiates depth map generation.
 // Returns a prediction ID used to poll for results.
 func callReplicate(imageBytes []byte) (string, error) {
-	// Convert image to base64
-	base64Image := base64.StdEncoding.EncodeToString(imageBytes)
+	// First upload image to HF to get a URL
+	filename := fmt.Sprintf("image_%d.jpg", time.Now().UnixNano())
+	imageURL, err := uploadToHF(imageBytes, filename)
+	if err != nil {
+		return "", fmt.Errorf("upload to HF: %w", err)
+	}
 
-	// Prepare request
+	// Prepare request with image URL
 	request := replicateRequest{
 		Version: modelVersion,
 		Input: struct {
 			Image string `json:"image"`
 		}{
-			Image: "data:image/jpeg;base64," + base64Image,
+			Image: "https://depth-anything-depth-anything-v2.hf.space/file=" + imageURL,
 		},
 	}
 
