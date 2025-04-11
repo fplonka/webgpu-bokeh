@@ -14,7 +14,7 @@ fn calculate_coc_radius(pixel_depth: f32, focal_depth: f32) -> f32 {
     if (params.background_only != 0u && pixel_depth >= focal_depth) {
         return 0;
     }
-    // TRADER MATH DO NOT TOUCH LOL
+    // trader math. trust.
     var dist = focal_depth - pixel_depth;
     let a = 2 / (2 - params.depth_of_field);
     let b = 1 - a;

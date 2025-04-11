@@ -1,8 +1,11 @@
+- n-gon with round edges
 - black sliders?
 - better indicator than red dot
 - fix on firefox
 - info for when webgpu is not supported
-- choose square/red/triangle?? bokeh
-- math for adding rgb? should be in linear space?
-    - todo: verify
-- partial overlap weight in blur
+- verify linear space rgb math
+- partial overlap weight in blur (prolly not)
+- make things grayed out / reset on new image upload
+- do we handle correctly uploading image when loading depth model?
+- drop go code
+- cloudflare deployment

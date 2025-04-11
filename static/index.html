@@ -46,7 +46,7 @@
             width: 40px;
             height: 40px;
             border: 4px solid #f3f3f3;
-            border-top: 4px solid #3498db;
+            border-top: 4px solid black;
             border-radius: 50%;
             animation: spin 1s linear infinite;
         }
@@ -55,11 +55,10 @@
 
 <body class="bg-zinc-100 min-h-screen p-4">
     <div class="bg-white max-w-2xl mx-auto p-6">
-        <h1>bokeh effect generator</h1>
+        <h1 class="mt-0">Bokeh Magic</h1>
 
         <p>
-            upload a photo to generate a bokeh effect. after uploading, click anywhere on the image to set the focus
-            point. adjust the blur strength and depth of field to taste.
+            Upload a photo, then click to set the focus. Use the sliders to adjust the blur strength.
         </p>
 
         <input class="mt-2" type="file" id="imageUpload" accept="image/*">
@@ -82,9 +81,9 @@
                     <div class="flex items-center gap-4">
                         <label for="blurStrength" class="w-24">Blur Strength</label>
                         <!-- TODO: max 6 -->
-                        <input type="range" id="blurStrength" min="1" max="7" step="0.1" value="3" class="flex-1"
+                        <input type="range" id="blurStrength" min="1" max="7" step="0.1" value="4" class="flex-1"
                             disabled>
-                        <input type="number" id="blurStrengthValue" min="1" max="7" step="0.1" value="3" class="w-16"
+                        <input type="number" id="blurStrengthValue" min="1" max="7" step="0.1" value="4" class="w-16"
                             disabled>
                     </div>
                     <div class="flex items-center gap-4">
@@ -374,14 +373,11 @@
         // Add event listeners for the sliders to reapply effect when changed
         let lastClickedPos = null;
         let updateTimer = null;
-        let isProcessing = false;
 
         async function updateEffect() {
-            console.log("isProcessing:", isProcessing);
-            if (!lastClickedPos || isProcessing) return;
+            if (!lastClickedPos) return;
 
             try {
-                isProcessing = true;
                 updateStatus('processing...');
                 const { x, y } = lastClickedPos;
                 const index = y * depthData.width + x;
@@ -393,7 +389,6 @@
                 console.error('Error applying bokeh:', error);
                 updateStatus('error applying effect', true);
             } finally {
-                isProcessing = false;
             }
         }
 
@@ -409,9 +404,7 @@
         backgroundOnly.addEventListener('change', debouncedUpdate);
 
         originalCanvas.addEventListener('click', async (event) => {
-            console.log("isProcessing:", isProcessing);
-            if (!depthData || isProcessing) return;
-            isProcessing = true;
+            if (!depthData) return;
 
             const rect = originalCanvas.getBoundingClientRect();
             const scaleX = originalCanvas.width / rect.width;
@@ -433,7 +426,6 @@
             updateStatus('processing...');
             await applyBokeh(originalCanvas, depth);
             updateStatus('processing...', false);
-            isProcessing = false;
             setControlsEnabled(true);
         });
 
