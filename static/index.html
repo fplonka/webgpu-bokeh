@@ -529,48 +529,30 @@
             const outputTexture = device.createTexture({
                 size: [canvas.width, canvas.height],
                 format: 'rgba8unorm',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
-            });
-
-            // Calculate padded bytes per row (must be multiple of 256)
-            const bytesPerPixel = 4; // RGBA8
-            const unpaddedBytesPerRow = canvas.width * bytesPerPixel;
-            const align = 256;
-            const paddedBytesPerRow = Math.ceil(unpaddedBytesPerRow / align) * align;
-            
-            // Create a padded buffer
-            const paddedBuffer = device.createBuffer({
-                size: paddedBytesPerRow * canvas.height,
-                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | 
+                       GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.STORAGE_BINDING
             });
             
-            // Copy from output buffer to padded buffer with correct stride
-            for (let y = 0; y < canvas.height; y++) {
-                commandEncoder.copyBufferToBuffer(
-                    outputPackedBuffer,
-                    y * unpaddedBytesPerRow,
-                    paddedBuffer,
-                    y * paddedBytesPerRow,
-                    unpaddedBytesPerRow
-                );
-            }
+            // Submit all the compute work
+            device.queue.submit([commandEncoder.finish()]);
             
-            // Copy from padded buffer to texture
-            commandEncoder.copyBufferToTexture(
-                { 
-                    buffer: paddedBuffer,
-                    bytesPerRow: paddedBytesPerRow,
-                    rowsPerImage: canvas.height
-                },
+            // Create a new command encoder for rendering
+            const renderEncoder = device.createCommandEncoder();
+            
+            // Map the staging buffer for reading
+            await stagingBuffer.mapAsync(GPUMapMode.READ);
+            const outputData = new Uint8Array(stagingBuffer.getMappedRange());
+            
+            // Copy output data directly to texture
+            device.queue.writeTexture(
                 { texture: outputTexture },
+                outputData,
+                { bytesPerRow: canvas.width * 4 },
                 [canvas.width, canvas.height]
             );
-
-            // Submit the processing work
-            device.queue.submit([commandEncoder.finish()]);
-
-            // Create a new command encoder for rendering to screen
-            const renderEncoder = device.createCommandEncoder();
+            
+            // Unmap the buffer after we're done
+            stagingBuffer.unmap();
 
             // Create a render pass to display the processed image
             const renderPassDescriptor = {
@@ -582,6 +564,7 @@
                 }]
             };
 
+            // Begin render pass with the new encoder
             const renderPass = renderEncoder.beginRenderPass(renderPassDescriptor);
             renderPass.setPipeline(renderPipeline);
 
@@ -631,56 +614,29 @@
                 usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
             });
             
-            // Calculate padded bytes per row (must be multiple of 256)
-            const bytesPerPixel = 4; // RGBA8
-            const unpaddedBytesPerRow = canvas.width * bytesPerPixel;
-            const align = 256;
-            const paddedBytesPerRow = Math.ceil(unpaddedBytesPerRow / align) * align;
-            
-            // Create a temporary canvas to get the pixel data with padding
-            const uploadTempCanvas = document.createElement('canvas');
-            uploadTempCanvas.width = canvas.width;
-            uploadTempCanvas.height = canvas.height;
-            const uploadTempCtx = uploadTempCanvas.getContext('2d');
-            uploadTempCtx.drawImage(img, 0, 0);
-            const uploadImageData = uploadTempCtx.getImageData(0, 0, canvas.width, canvas.height);
-            
-            // Create a padded buffer
-            const paddedBuffer = device.createBuffer({
-                size: paddedBytesPerRow * canvas.height,
-                usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+            // Create a temporary texture to hold the image bitmap
+            const bitmapTexture = device.createTexture({
+                size: [canvas.width, canvas.height],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.TEXTURE_BINDING | 
+                       GPUTextureUsage.COPY_SRC | 
+                       GPUTextureUsage.RENDER_ATTACHMENT | 
+                       GPUTextureUsage.COPY_DST
             });
             
-            // Create an unpadded buffer for the image data
-            const unpadded = device.createBuffer({
-                size: unpaddedBytesPerRow * canvas.height,
-                usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-            });
+            // Copy the image bitmap directly to the texture
+            device.queue.copyExternalImageToTexture(
+                { source: imageBitmap },
+                { texture: bitmapTexture },
+                [canvas.width, canvas.height]
+            );
             
-            // Copy image data to unpadded buffer
-            device.queue.writeBuffer(unpadded, 0, uploadImageData.data);
-            
-            // Create command encoder for padding operation
+            // Create command encoder for copying
             const uploadCommandEncoder = device.createCommandEncoder();
             
-            // Copy from unpadded to padded buffer with correct stride
-            for (let y = 0; y < canvas.height; y++) {
-                uploadCommandEncoder.copyBufferToBuffer(
-                    unpadded,
-                    y * unpaddedBytesPerRow,
-                    paddedBuffer,
-                    y * paddedBytesPerRow,
-                    unpaddedBytesPerRow
-                );
-            }
-            
-            // Copy from padded buffer to texture
-            uploadCommandEncoder.copyBufferToTexture(
-                { 
-                    buffer: paddedBuffer,
-                    bytesPerRow: paddedBytesPerRow,
-                    rowsPerImage: canvas.height
-                },
+            // Copy from bitmap texture to our working texture
+            uploadCommandEncoder.copyTextureToTexture(
+                { texture: bitmapTexture },
                 { texture: originalTexture },
                 [canvas.width, canvas.height]
             );
