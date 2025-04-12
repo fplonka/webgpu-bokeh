@@ -148,7 +148,7 @@ def generate_sample_offsets(num_samples: int, angle_deg: float) -> np.ndarray:
 
 @njit
 def apply_directional_blur(rgba_float: np.ndarray, coc_array: np.ndarray, 
-                         offsets: np.ndarray, max_coc: float) -> np.ndarray:
+                         offsets: np.ndarray) -> np.ndarray:
     """Apply blur along the direction specified by the offsets."""
     height, width = rgba_float.shape[:2]
     result = np.zeros_like(rgba_float)
@@ -254,36 +254,48 @@ if __name__ == "__main__":
     
     # Generate sample offsets for all passes
     offsets_0deg = generate_sample_offsets(num_samples, 0)     # Horizontal (0°)
-    offsets_45deg = generate_sample_offsets(num_samples, 60)   # 45° diagonal
-    offsets_135deg = generate_sample_offsets(num_samples, 120) # 135° diagonal (45° + 90°)
+    offsets_45deg = generate_sample_offsets(num_samples, 45)   # 45° diagonal
+    offsets_60deg = generate_sample_offsets(num_samples, 60)   # 60° diagonal
+    offsets_90deg = generate_sample_offsets(num_samples, 90)   # 90° diagonal
+    offsets_120deg = generate_sample_offsets(num_samples, 120)   # 90° diagonal
+    offsets_135deg = generate_sample_offsets(num_samples, 135) # 135° diagonal (45° + 90°)
     
     # Convert to float32 for processing
     rgba_float = unpack_rgba_uint32(rgba_array)
     
-    # Create first bokeh blur (0° -> 45°)
-    print("Creating first bokeh blur (0° -> 45°)...")
-    horizontal_blur = apply_directional_blur(rgba_float, coc_array, offsets_0deg, max_coc)
-    bokeh_45_float = apply_directional_blur(horizontal_blur, coc_array, offsets_45deg, max_coc)
+    def do_hexagon_bokeh(rgba_float: np.ndarray, coc_array: np.ndarray, max_coc: float):
+        print("doing horizontal")
+        horizontal_blur = apply_directional_blur(rgba_float, coc_array, offsets_0deg, max_coc)
+        print("doing 60°")
+        bokeh_60_float = apply_directional_blur(horizontal_blur, coc_array, offsets_60deg, max_coc)
+        print("doing 120")
+        bokeh_120_float = apply_directional_blur(horizontal_blur, coc_array, offsets_120deg, max_coc)
+        
+        # Combine the two blurs by taking the less bright pixel
+        combined_float = combine_less_bright(bokeh_60_float, bokeh_120_float)
+
+        combined = pack_rgba_float32(combined_float)
+        save_rgba_uint32_as_image(combined, os.path.join(script_dir, "bokeh_combined.png"))
+        print("Images saved.")
+        
+    def do_octagon_bokeh(rgba_float: np.ndarray, coc_array: np.ndarray):
+        print("doing horizontal")
+        horizontal_blur = apply_directional_blur(rgba_float, coc_array, offsets_0deg)
+        print("doing 90")
+        bokeh_90_float = apply_directional_blur(horizontal_blur, coc_array, offsets_90deg)
+
+        print("doing 45")
+        bokeh_45_float = apply_directional_blur(rgba_float, coc_array, offsets_45deg)
+        print("doing 135")
+        bokeh_135_float = apply_directional_blur(bokeh_45_float, coc_array, offsets_135deg)
+
+        # Combine the two blurs by taking the less bright pixel
+        combined_float = combine_less_bright(bokeh_90_float, bokeh_135_float)
+
+        combined = pack_rgba_float32(combined_float)
+        save_rgba_uint32_as_image(combined, os.path.join(script_dir, "bokeh_combined.png"))
+        print("Images saved.")
+        
+    # do_hexagon_bokeh(rgba_float, coc_array)
+    do_octagon_bokeh(rgba_float, coc_array)
     
-    # Create second bokeh blur (0° -> 135°)
-    print("Creating second bokeh blur (0° -> 135°)...")
-    bokeh_135_float = apply_directional_blur(horizontal_blur, coc_array, offsets_135deg, max_coc)
-    
-    # Combine the two blurs by taking the less bright pixel
-    print("Combining the two bokeh blurs...")
-    combined_float = combine_less_bright(bokeh_45_float, bokeh_135_float)
-    
-    # Pack results back to uint32
-    bokeh_45 = pack_rgba_float32(bokeh_45_float)
-    bokeh_135 = pack_rgba_float32(bokeh_135_float)
-    combined = pack_rgba_float32(combined_float)
-    
-    # Save all results
-    save_rgba_uint32_as_image(bokeh_45, os.path.join(script_dir, "bokeh_45.png"))
-    save_rgba_uint32_as_image(bokeh_135, os.path.join(script_dir, "bokeh_135.png"))
-    save_rgba_uint32_as_image(combined, os.path.join(script_dir, "bokeh_combined.png"))
-    
-    print("Images saved:")
-    print("- bokeh_45.png (0° -> 45° blur)")
-    print("- bokeh_135.png (0° -> 135° blur)")
-    print("- bokeh_combined.png (combined result)")
