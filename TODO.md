@@ -1,10 +1,8 @@
-- n-gon with round edges
+- polygons
 - black sliders?
 - better indicator than red dot
 - fix on firefox
 - info for when webgpu is not supported
-- verify linear space rgb math
-- partial overlap weight in blur (prolly not)
 - make things grayed out / reset on new image upload
 - do we handle correctly uploading image when loading depth model?
 - drop go code

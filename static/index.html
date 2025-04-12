@@ -136,12 +136,13 @@
             // Model and rendering state
             webgpu: {
                 device: null,
+                context: null,
                 pipelines: {
                     coc: null,
                     toLinear: null,
                     blurV: null,
                     blurH: null,
-                    toSrgb: null
+                    renderToCanvas: null
                 }
             },
             model: {
@@ -181,7 +182,7 @@
                 }
             }
         }
-        // recursiveSeal(state);
+        recursiveSeal(state);
 
         // Start loading the depth model
         import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.2/dist/transformers.min.js';
@@ -218,11 +219,11 @@
             backgroundOnly.disabled = !enabled;
         }
 
-        // TODO: max val??
         blurStrength.addEventListener('input', (e) => {
             blurStrengthValue.value = e.target.value;
+            updateEffect();
         });
-        blurStrengthValue.addEventListener('input', (e) => {
+        blurStrengthValue.addEventListener('change', (e) => {
             blurStrength.value = e.target.value;
             updateEffect();
         });
@@ -263,9 +264,6 @@
                 format: presentationFormat,
                 alphaMode: 'premultiplied'
             });
-
-            // Store presentation format for later use
-            state.webgpu.presentationFormat = presentationFormat;
 
             // Load and compile all shaders
             const [cocCode, toLinearCode, blurHLinearCode, blurVLinearCode, fullscreenQuadCode] = await Promise.all([
@@ -577,6 +575,7 @@
                 });
 
                 // Convert to linear space
+                // (this is a bit dumb, we use it to reuse the same rendering shader we use when applying the blur)
                 const computeEncoder = state.webgpu.device.createCommandEncoder();
                 const computePass = computeEncoder.beginComputePass();
                 computePass.setPipeline(state.webgpu.pipelines.toLinear);
