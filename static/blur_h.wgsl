@@ -9,46 +9,15 @@ struct Params {
 @group(0) @binding(2) var<uniform> params: Params;
 @group(0) @binding(3) var<storage, read> cocBuffer: array<f32>;
 
-fn srgbToLinear(x: f32) -> f32 {
-    if x <= 0.04045 {
-        return x / 12.92;
-    } else {
-        return pow((x + 0.055) / 1.055, 2.4);
-    }
+fn extractChannel(color: u32, shift: u32) -> f32 {
+    return f32((color >> shift) & 0xFFu);
 }
 
-fn linearToSrgb(x: f32) -> f32 {
-    if x <= 0.0031308 {
-        return 12.92 * x;
-    } else {
-        return 1.055 * pow(x, 1.0 / 2.4) - 0.055;
-    }
-}
-
-fn unpackRGBA(color: u32) -> vec4<f32> {
-    let r = f32((color >> 0u) & 0xFFu) / 255.0;
-    let g = f32((color >> 8u) & 0xFFu) / 255.0;
-    let b = f32((color >> 16u) & 0xFFu) / 255.0;
-    let a = f32((color >> 24u) & 0xFFu) / 255.0;
-    return vec4<f32>(
-        srgbToLinear(r),
-        srgbToLinear(g),
-        srgbToLinear(b),
-        a
-    );
-}
-
-fn packRGBA(color: vec4<f32>) -> u32 {
-    let srgb = vec4<f32>(
-        linearToSrgb(color.r),
-        linearToSrgb(color.g),
-        linearToSrgb(color.b),
-        color.a
-    );
-    let r = u32(clamp(srgb.r, 0.0, 1.0) * 255.0);
-    let g = u32(clamp(srgb.g, 0.0, 1.0) * 255.0);
-    let b = u32(clamp(srgb.b, 0.0, 1.0) * 255.0);
-    let a = u32(clamp(srgb.a, 0.0, 1.0) * 255.0);
+fn combineChannels(r: f32, g: f32, b: f32, a: f32) -> u32 {
+    let ru = u32(clamp(r, 0.0, 255.0));
+    let gu = u32(clamp(g, 0.0, 255.0));
+    let bu = u32(clamp(b, 0.0, 255.0));
+    let au = u32(clamp(a, 0.0, 255.0));
     return (a << 24u) | (b << 16u) | (g << 8u) | r;
 }
 
