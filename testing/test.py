@@ -3,7 +3,7 @@ import numpy as np
 from PIL import Image
 import os
 from typing import Tuple
-from numba import njit
+from numba import njit, prange, parallel
 
 def read_image_to_rgba_uint32(image_path):
     """
@@ -146,22 +146,26 @@ def generate_sample_offsets(num_samples: int, angle_deg: float) -> np.ndarray:
     
     return offsets
 
-@njit
+@njit(parallel=True)
 def apply_directional_blur(rgba_float: np.ndarray, coc_array: np.ndarray, 
                          offsets: np.ndarray) -> np.ndarray:
     """Apply blur along the direction specified by the offsets."""
     height, width = rgba_float.shape[:2]
     result = np.zeros_like(rgba_float)
     
-    for y in range(height):
+    # Process each row in parallel
+    for y in prange(height):
+        # Pre-allocate arrays for this thread
+        color_sum = np.zeros(4, dtype=np.float32)
+        
         for x in range(width):
             coc = coc_array[y, x]
             if coc == 0:
                 result[y, x] = rgba_float[y, x]
                 continue
             
-            # Initialize accumulators
-            color_sum = np.zeros(4, dtype=np.float32)
+            # Reset accumulators for this pixel
+            color_sum.fill(0)
             weight_sum = 0.0
             
             # Sample along the scaled offsets
@@ -179,11 +183,9 @@ def apply_directional_blur(rgba_float: np.ndarray, coc_array: np.ndarray,
                 if dist > sample_coc:
                     continue
                 
-                weight = 1.0
-                
                 # Add to accumulator
-                color_sum += rgba_float[sample_y, sample_x] * weight
-                weight_sum += weight
+                color_sum += rgba_float[sample_y, sample_x]
+                weight_sum += 1.0
             
             # Calculate final color
             if weight_sum > 0:
@@ -193,13 +195,14 @@ def apply_directional_blur(rgba_float: np.ndarray, coc_array: np.ndarray,
     
     return result
 
-@njit
+@njit(parallel=True)
 def combine_less_bright(img1: np.ndarray, img2: np.ndarray) -> np.ndarray:
     """Create a new image by taking the less bright pixel from each source image."""
     height, width = img1.shape[:2]
     result = np.zeros_like(img1)
     
-    for y in range(height):
+    # Process each row in parallel
+    for y in prange(height):
         for x in range(width):
             # Calculate brightness (using luminance formula)
             brightness1 = 0.2126 * img1[y, x, 0] + 0.7152 * img1[y, x, 1] + 0.0722 * img1[y, x, 2]
