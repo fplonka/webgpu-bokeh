@@ -163,7 +163,10 @@
 
         let device = null;
         let cocPipeline = null;
-        let blurPipeline = null;
+        let blurHPipeline = null;
+        let blurVPipeline = null;
+        let blurHBindGroup = null;
+        let blurVBindGroup = null;
         let originalPixels = null;
 
         // Sync number inputs with range inputs
@@ -198,17 +201,22 @@
             });
 
             // Load and compile both shaders
-            const [cocCode, bokehCode] = await Promise.all([
+            const [cocCode, blurHCode, blurVCode] = await Promise.all([
                 fetch('coc.wgsl').then(r => r.text()),
-                fetch('blur.wgsl').then(r => r.text())
+                fetch('blur_h.wgsl').then(r => r.text()),
+                fetch('blur_v.wgsl').then(r => r.text())
             ]);
 
             const cocShaderModule = device.createShaderModule({
                 code: cocCode
             });
 
-            const bokehShaderModule = device.createShaderModule({
-                code: bokehCode
+            const blurHShaderModule = device.createShaderModule({
+                code: blurHCode
+            });
+
+            const blurVShaderModule = device.createShaderModule({
+                code: blurVCode
             });
 
             // Create pipelines for both passes
@@ -220,10 +228,18 @@
                 }
             });
 
-            blurPipeline = device.createComputePipeline({
+            blurHPipeline = device.createComputePipeline({
                 layout: 'auto',
                 compute: {
-                    module: bokehShaderModule,
+                    module: blurHShaderModule,
+                    entryPoint: 'main'
+                }
+            });
+
+            blurVPipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: {
+                    module: blurVShaderModule,
                     entryPoint: 'main'
                 }
             });
@@ -298,7 +314,13 @@
                 usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
             });
 
-            // Create bind groups for both passes
+            // Create intermediate buffer for horizontal pass results
+            const intermediateBuffer = device.createBuffer({
+                size: originalPixels.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            });
+
+            // Create bind groups for all passes
             const cocBindGroup = device.createBindGroup({
                 layout: cocPipeline.getBindGroupLayout(0),
                 entries: [
@@ -309,10 +331,20 @@
                 ],
             });
 
-            const bokehBindGroup = device.createBindGroup({
-                layout: blurPipeline.getBindGroupLayout(0),
+            const blurHBindGroup = device.createBindGroup({
+                layout: blurHPipeline.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: { buffer: inputBuffer } },
+                    { binding: 1, resource: { buffer: intermediateBuffer } },
+                    { binding: 2, resource: { buffer: shaderParamsBuffer } },
+                    { binding: 3, resource: { buffer: cocBuffer } },
+                ],
+            });
+
+            const blurVBindGroup = device.createBindGroup({
+                layout: blurVPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: intermediateBuffer } },
                     { binding: 1, resource: { buffer: outputBuffer } },
                     { binding: 2, resource: { buffer: shaderParamsBuffer } },
                     { binding: 3, resource: { buffer: cocBuffer } },
@@ -333,14 +365,25 @@
             cocPass.end();
 
             // Second pass: apply bokeh blur
-            const bokehPass = commandEncoder.beginComputePass();
-            bokehPass.setPipeline(blurPipeline);
-            bokehPass.setBindGroup(0, bokehBindGroup);
-            bokehPass.dispatchWorkgroups(
+            // Horizontal pass
+            const blurHPass = commandEncoder.beginComputePass();
+            blurHPass.setPipeline(blurHPipeline);
+            blurHPass.setBindGroup(0, blurHBindGroup);
+            blurHPass.dispatchWorkgroups(
                 Math.ceil(canvas.width / 8),
                 Math.ceil(canvas.height / 8)
             );
-            bokehPass.end();
+            blurHPass.end();
+
+            // Vertical pass
+            const blurVPass = commandEncoder.beginComputePass();
+            blurVPass.setPipeline(blurVPipeline);
+            blurVPass.setBindGroup(0, blurVBindGroup);
+            blurVPass.dispatchWorkgroups(
+                Math.ceil(canvas.width / 8),
+                Math.ceil(canvas.height / 8)
+            );
+            blurVPass.end();
 
             // Copy output to staging buffer
             commandEncoder.copyBufferToBuffer(
@@ -388,7 +431,6 @@
 
         // Add event listeners for the sliders to reapply effect when changed
         let lastClickedPos = null;
-        let updateTimer = null;
 
         async function updateEffect() {
             if (!lastClickedPos) return;
@@ -408,16 +450,10 @@
             }
         }
 
-        // so that scrollbar thing doesn't update a trillion times
-        function debouncedUpdate() {
-            clearTimeout(updateTimer);
-            updateTimer = setTimeout(updateEffect, 50);
-        }
-
-        blurStrength.addEventListener('input', debouncedUpdate);
-        depthOfField.addEventListener('input', debouncedUpdate);
-        bokehShape.addEventListener('change', debouncedUpdate);
-        backgroundOnly.addEventListener('change', debouncedUpdate);
+        blurStrength.addEventListener('input', updateEffect);
+        depthOfField.addEventListener('input', updateEffect);
+        bokehShape.addEventListener('change', updateEffect);
+        backgroundOnly.addEventListener('change', updateEffect);
 
         originalCanvas.addEventListener('click', async (event) => {
             if (!depthData) return;

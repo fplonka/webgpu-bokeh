@@ -30,7 +30,6 @@ fn unpackRGBA(color: u32) -> vec4<f32> {
     let g = f32((color >> 8u) & 0xFFu) / 255.0;
     let b = f32((color >> 16u) & 0xFFu) / 255.0;
     let a = f32((color >> 24u) & 0xFFu) / 255.0;
-    // Convert RGB to linear space, keep alpha as is
     return vec4<f32>(
         srgbToLinear(r),
         srgbToLinear(g),
@@ -40,7 +39,6 @@ fn unpackRGBA(color: u32) -> vec4<f32> {
 }
 
 fn packRGBA(color: vec4<f32>) -> u32 {
-    // Convert RGB back to sRGB space, keep alpha as is
     let srgb = vec4<f32>(
         linearToSrgb(color.r),
         linearToSrgb(color.g),
@@ -59,7 +57,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
     
-    // Skip if outside the image
     if x >= params.width || y >= params.height {
         return;
     }
@@ -71,54 +68,41 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var sumWeight = 0.0;
     let radius = i32(ceil(centerCoC));
 
-    // Bokeh blur: weighted average based on CoC
+    // Vertical pass only samples along y
     for (var dy = -radius; dy <= radius; dy++) {
-        for (var dx = -radius; dx <= radius; dx++) {
-            let sampleX = i32(x) + dx; // TODO: unsigned?
-            let sampleY = i32(y) + dy;
-
-            // Skip samples outside the image
-            if sampleX < 0 || sampleX >= i32(params.width) || sampleY < 0 || sampleY >= i32(params.height) {
-                continue;
-            }
-
-            let sampleIdx = u32(sampleY) * params.width + u32(sampleX);
-            let sampleCoC = cocBuffer[sampleIdx];
-            
-            // Distance based on shape
-            let fdx = f32(dx);
-            let fdy = f32(dy);
-            
-            var isInShape = false;
-            if params.shape == 0u { // circle
-                let dist = sqrt(fdx * fdx + fdy * fdy);
-                isInShape = dist <= sampleCoC;
-            } else if params.shape == 1u { // square
-                let dist = max(abs(fdx), abs(fdy));
-                isInShape = dist <= sampleCoC;
-            } else { // hexagon
-                // For unit hexagon (r=1), check if point is inside using the formula:
-                // √3 * |x| + |y| <= √3
-                // Scale by sampleCoC to get desired size
-                let ax = abs(fdx / sampleCoC);
-                let ay = abs(fdy / sampleCoC);
-                isInShape = (1.732051 * ax + ay) <= 1.732051; // √3 ≈ 1.732051
-            }
-
-            if !isInShape {
-                continue;
-            }
-
-            sumColor += unpackRGBA(inputImage[sampleIdx]);
-            sumWeight += 1;
+        let sampleY = i32(y) + dy;
+        
+        // Skip samples outside the image
+        if sampleY < 0 || sampleY >= i32(params.height) {
+            continue;
         }
+
+        let sampleIdx = u32(sampleY) * params.width + x;
+        let sampleCoC = cocBuffer[sampleIdx];
+        
+        // For vertical pass, we only check y distance
+        let fdy = f32(dy);
+        var isInShape = false;
+        
+        if params.shape == 0u { // circle
+            isInShape = abs(fdy) <= sampleCoC;
+        } else if params.shape == 1u { // square
+            isInShape = abs(fdy) <= sampleCoC;
+        } else { // hexagon
+            isInShape = abs(fdy) <= sampleCoC;
+        }
+
+        if !isInShape {
+            continue;
+        }
+
+        sumColor += unpackRGBA(inputImage[sampleIdx]);
+        sumWeight += 1.0;
     }
 
-    // Normalize and write output
-    let outputIdx = y * params.width + x;
     if sumWeight > 0.0 {
-        outputImage[outputIdx] = packRGBA(sumColor / sumWeight);
+        outputImage[centerIdx] = packRGBA(sumColor / sumWeight);
     } else {
-        outputImage[outputIdx] = inputImage[outputIdx];
+        outputImage[centerIdx] = inputImage[centerIdx];
     }
-} 
+}
