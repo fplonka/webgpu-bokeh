@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 import os
 from typing import Tuple
+from numba import njit
 
 def read_image_to_rgba_uint32(image_path):
     """
@@ -54,70 +55,178 @@ def read_depth_map_to_float32(depth_map_path):
     
     return depth_normalized, width, height
 
+@njit
+def srgb_to_linear(srgb_value: float) -> float:
+    """Convert from sRGB to linear RGB color space."""
+    if srgb_value <= 0.04045:
+        return srgb_value / 12.92
+    else:
+        return ((srgb_value + 0.055) / 1.055) ** 2.4
+
+@njit
+def linear_to_srgb(linear_value: float) -> float:
+    """Convert from linear RGB to sRGB color space."""
+    if linear_value <= 0.0031308:
+        return linear_value * 12.92
+    else:
+        return 1.055 * (linear_value ** (1.0/2.4)) - 0.055
+
+@njit
 def unpack_rgba_uint32(rgba_uint32: np.ndarray) -> np.ndarray:
-    """Unpack uint32 RGBA values into a float32 RGBA array with values 0-1."""
-    r = ((rgba_uint32 >> 24) & 0xFF).astype(np.float32) / 255.0
-    g = ((rgba_uint32 >> 16) & 0xFF).astype(np.float32) / 255.0
-    b = ((rgba_uint32 >> 8) & 0xFF).astype(np.float32) / 255.0
-    a = (rgba_uint32 & 0xFF).astype(np.float32) / 255.0
-    return np.stack([r, g, b, a], axis=-1)
-
-def pack_rgba_float32(rgba_float32: np.ndarray) -> np.ndarray:
-    """Pack float32 RGBA values (0-1) into uint32 RGBA values."""
-    rgba_uint8 = (rgba_float32 * 255.0).astype(np.uint32)
-    return (rgba_uint8[..., 0] << 24) | (rgba_uint8[..., 1] << 16) | \
-           (rgba_uint8[..., 2] << 8) | rgba_uint8[..., 3]
-
-def box_blur_horizontal(rgba_uint32: np.ndarray, coc_array: np.ndarray) -> np.ndarray:
-    """Apply horizontal box blur based on CoC values."""
+    """Unpack uint32 RGBA values into a float32 RGBA array with values 0-1 in linear RGB space."""
     height, width = rgba_uint32.shape
-    rgba_float = unpack_rgba_uint32(rgba_uint32)
+    result = np.zeros((height, width, 4), dtype=np.float32)
+    
+    for y in range(height):
+        for x in range(width):
+            pixel = rgba_uint32[y, x]
+            
+            # Convert sRGB to linear RGB for RGB channels
+            r_srgb = ((pixel >> 24) & 0xFF) / 255.0
+            g_srgb = ((pixel >> 16) & 0xFF) / 255.0
+            b_srgb = ((pixel >> 8) & 0xFF) / 255.0
+            a = (pixel & 0xFF) / 255.0  # Alpha stays as is
+            
+            # Convert to linear RGB
+            result[y, x, 0] = srgb_to_linear(r_srgb)
+            result[y, x, 1] = srgb_to_linear(g_srgb)
+            result[y, x, 2] = srgb_to_linear(b_srgb)
+            result[y, x, 3] = a
+    return result
+
+@njit
+def pack_rgba_float32(rgba_float32: np.ndarray) -> np.ndarray:
+    """Pack float32 RGBA values (0-1) in linear RGB space into uint32 RGBA values in sRGB space."""
+    height, width = rgba_float32.shape[:2]
+    result = np.zeros((height, width), dtype=np.uint32)
+    
+    for y in range(height):
+        for x in range(width):
+            # Convert from linear RGB to sRGB for RGB channels
+            r_linear = rgba_float32[y, x, 0]
+            g_linear = rgba_float32[y, x, 1]
+            b_linear = rgba_float32[y, x, 2]
+            a = rgba_float32[y, x, 3]  # Alpha stays as is
+            
+            # Convert to sRGB
+            r_srgb = linear_to_srgb(r_linear)
+            g_srgb = linear_to_srgb(g_linear)
+            b_srgb = linear_to_srgb(b_linear)
+            
+            # Pack as 8-bit values
+            r = int(r_srgb * 255)
+            g = int(g_srgb * 255)
+            b = int(b_srgb * 255)
+            a = int(a * 255)
+            
+            # Clamp to valid range
+            r = max(0, min(255, r))
+            g = max(0, min(255, g))
+            b = max(0, min(255, b))
+            a = max(0, min(255, a))
+            
+            result[y, x] = (r << 24) | (g << 16) | (b << 8) | a
+    return result
+
+@njit
+def generate_sample_offsets(num_samples: int, angle_deg: float) -> np.ndarray:
+    """Generate sample offsets along a line at the specified angle.
+    Returns array of (x, y) offsets normalized to unit length."""
+    # Convert angle to radians
+    angle_rad = angle_deg * np.pi / 180.0
+    
+    # Create evenly spaced offsets from -0.5 to 0.5
+    offsets = np.zeros((num_samples, 2), dtype=np.float32)
+    step = 1.0 / (num_samples - 1)
+    
+    for i in range(num_samples):
+        t = -0.5 + i * step
+        offsets[i, 0] = t * np.cos(angle_rad)  # x
+        offsets[i, 1] = t * np.sin(angle_rad)  # y
+    
+    return offsets
+
+@njit
+def apply_directional_blur(rgba_float: np.ndarray, coc_array: np.ndarray, 
+                         offsets: np.ndarray, max_coc: float) -> np.ndarray:
+    """Apply blur along the direction specified by the offsets."""
+    height, width = rgba_float.shape[:2]
     result = np.zeros_like(rgba_float)
     
     for y in range(height):
         for x in range(width):
-            radius = int(np.ceil(coc_array[y, x]))
-            if radius == 0:
+            coc = coc_array[y, x]
+            if coc == 0:
                 result[y, x] = rgba_float[y, x]
                 continue
-                
-            # Calculate valid x range for sampling
-            x_start = max(0, x - radius)
-            x_end = min(width, x + radius + 1)
             
-            # Calculate average color within the box
-            sample_colors = rgba_float[y, x_start:x_end]
-            result[y, x] = np.mean(sample_colors, axis=0)
-    
-    return pack_rgba_float32(result)
+            # Initialize accumulators
+            color_sum = np.zeros(4, dtype=np.float32)
+            weight_sum = 0.0
+            
+            # Sample along the scaled offsets
+            for i in range(len(offsets)):
+                # Calculate sample position
+                sample_x = int(x + offsets[i, 0] * coc)
+                sample_y = int(y + offsets[i, 1] * coc)
 
-def box_blur_vertical(rgba_uint32: np.ndarray, coc_array: np.ndarray) -> np.ndarray:
-    """Apply vertical box blur based on CoC values."""
-    height, width = rgba_uint32.shape
-    rgba_float = unpack_rgba_uint32(rgba_uint32)
-    result = np.zeros_like(rgba_float)
-    
-    for x in range(width):
-        for y in range(height):
-            radius = int(np.ceil(coc_array[y, x]))
-            if radius == 0:
-                result[y, x] = rgba_float[y, x]
-                continue
+                if sample_x < 0 or sample_x >= width or sample_y < 0 or sample_y >= height:
+                    continue
                 
-            # Calculate valid y range for sampling
-            y_start = max(0, y - radius)
-            y_end = min(height, y + radius + 1)
+                sample_coc = coc_array[sample_y, sample_x]
+                
+                dist = np.sqrt((sample_x - x)**2 + (sample_y - y)**2)
+                if dist > sample_coc:
+                    continue
+                
+                weight = 1.0
+                
+                # Add to accumulator
+                color_sum += rgba_float[sample_y, sample_x] * weight
+                weight_sum += weight
             
-            # Calculate average color within the box
-            sample_colors = rgba_float[y_start:y_end, x]
-            result[y, x] = np.mean(sample_colors, axis=0)
+            # Calculate final color
+            if weight_sum > 0:
+                result[y, x] = color_sum / weight_sum
+            else:
+                result[y, x] = rgba_float[y, x]
     
-    return pack_rgba_float32(result)
+    return result
+
+@njit
+def combine_less_bright(img1: np.ndarray, img2: np.ndarray) -> np.ndarray:
+    """Create a new image by taking the less bright pixel from each source image."""
+    height, width = img1.shape[:2]
+    result = np.zeros_like(img1)
+    
+    for y in range(height):
+        for x in range(width):
+            # Calculate brightness (using luminance formula)
+            brightness1 = 0.2126 * img1[y, x, 0] + 0.7152 * img1[y, x, 1] + 0.0722 * img1[y, x, 2]
+            brightness2 = 0.2126 * img2[y, x, 0] + 0.7152 * img2[y, x, 1] + 0.0722 * img2[y, x, 2]
+            
+            # Choose the pixel with lower brightness
+            if brightness1 <= brightness2:
+                result[y, x] = img1[y, x]
+            else:
+                result[y, x] = img2[y, x]
+    
+    return result
 
 def save_rgba_uint32_as_image(rgba_uint32: np.ndarray, output_path: str) -> None:
     """Save an RGBA uint32 array as a PNG image."""
-    rgba_float = unpack_rgba_uint32(rgba_uint32)
-    rgba_uint8 = (rgba_float * 255).astype(np.uint8)
+    height, width = rgba_uint32.shape
+    rgba_uint8 = np.zeros((height, width, 4), dtype=np.uint8)
+    
+    # Directly extract bytes from the uint32 values
+    for y in range(height):
+        for x in range(width):
+            pixel = rgba_uint32[y, x]
+            rgba_uint8[y, x, 0] = (pixel >> 24) & 0xFF  # R
+            rgba_uint8[y, x, 1] = (pixel >> 16) & 0xFF  # G
+            rgba_uint8[y, x, 2] = (pixel >> 8) & 0xFF   # B
+            rgba_uint8[y, x, 3] = pixel & 0xFF          # A
+    
     Image.fromarray(rgba_uint8, 'RGBA').save(output_path)
 
 if __name__ == "__main__":
@@ -128,9 +237,10 @@ if __name__ == "__main__":
     image_path = os.path.join(script_dir, "image.jpg")
     depth_map_path = os.path.join(script_dir, "depth_map.png")
     
-    # Define constants for CoC calculation
+    # Define constants
     focus_depth = 0.4  # Focus on objects at depth 0.4 (normalized scale)
-    max_coc = 10.0     # Maximum circle of confusion radius in pixels
+    max_coc = 150.0    # Maximum circle of confusion radius in pixels
+    num_samples = int(max_coc/2)   # Number of samples per pass
     
     # Read the image into RGBA uint32 array
     rgba_array, img_width, img_height = read_image_to_rgba_uint32(image_path)
@@ -139,16 +249,41 @@ if __name__ == "__main__":
     depth_array, depth_width, depth_height = read_depth_map_to_float32(depth_map_path)
     
     # Compute Circle of Confusion (CoC) radius for each pixel
-    # Simple formula: |depth - focus_depth| * max_coc
-    coc_array = np.abs(depth_array - focus_depth) * max_coc
+    # Only blur objects closer than the focus plane
+    coc_array = np.where(depth_array > focus_depth, 0, np.abs(depth_array - focus_depth) * max_coc)
     
-    print("Applying horizontal blur...")
-    horizontal_blur = box_blur_horizontal(rgba_array, coc_array)
+    # Generate sample offsets for all passes
+    offsets_0deg = generate_sample_offsets(num_samples, 0)     # Horizontal (0°)
+    offsets_45deg = generate_sample_offsets(num_samples, 60)   # 45° diagonal
+    offsets_135deg = generate_sample_offsets(num_samples, 120) # 135° diagonal (45° + 90°)
     
-    print("Applying vertical blur...")
-    final_blur = box_blur_vertical(horizontal_blur, coc_array)
+    # Convert to float32 for processing
+    rgba_float = unpack_rgba_uint32(rgba_array)
     
-    # Save the result
-    output_path = os.path.join(script_dir, "blurred_output.png")
-    save_rgba_uint32_as_image(final_blur, output_path)
-    print(f"\nBlurred image saved as 'blurred_output.png'")
+    # Create first bokeh blur (0° -> 45°)
+    print("Creating first bokeh blur (0° -> 45°)...")
+    horizontal_blur = apply_directional_blur(rgba_float, coc_array, offsets_0deg, max_coc)
+    bokeh_45_float = apply_directional_blur(horizontal_blur, coc_array, offsets_45deg, max_coc)
+    
+    # Create second bokeh blur (0° -> 135°)
+    print("Creating second bokeh blur (0° -> 135°)...")
+    bokeh_135_float = apply_directional_blur(horizontal_blur, coc_array, offsets_135deg, max_coc)
+    
+    # Combine the two blurs by taking the less bright pixel
+    print("Combining the two bokeh blurs...")
+    combined_float = combine_less_bright(bokeh_45_float, bokeh_135_float)
+    
+    # Pack results back to uint32
+    bokeh_45 = pack_rgba_float32(bokeh_45_float)
+    bokeh_135 = pack_rgba_float32(bokeh_135_float)
+    combined = pack_rgba_float32(combined_float)
+    
+    # Save all results
+    save_rgba_uint32_as_image(bokeh_45, os.path.join(script_dir, "bokeh_45.png"))
+    save_rgba_uint32_as_image(bokeh_135, os.path.join(script_dir, "bokeh_135.png"))
+    save_rgba_uint32_as_image(combined, os.path.join(script_dir, "bokeh_combined.png"))
+    
+    print("Images saved:")
+    print("- bokeh_45.png (0° -> 45° blur)")
+    print("- bokeh_135.png (0° -> 135° blur)")
+    print("- bokeh_combined.png (combined result)")
