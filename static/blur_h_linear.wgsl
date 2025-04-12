@@ -23,7 +23,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     var sumColor = vec4<f32>(0.0);
     var sumWeight = 0.0;
-    let radius = i32(ceil(centerCoC));
+    let radius = i32(ceil(centerCoC)); // TODO: max coc no???
 
     // Horizontal pass only samples along x
     for (var dx = -radius; dx <= radius; dx++) {

@@ -72,6 +72,16 @@
                         <div class="spinner"></div>
                     </div>
                 </div>
+                
+                <!-- Added depth map display and download button -->
+                <div class="mt-4" id="depthMapContainer" style="display: none;">
+                    <h3 class="text-lg font-medium mb-2">Depth Map</h3>
+                    <canvas id="depthMapCanvas" class="w-full border border-gray-300"></canvas>
+                    <div class="mt-2 flex gap-2">
+                        <button id="downloadDepthMap" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">Download Depth Map</button>
+                        <button id="downloadOriginalImage" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">Download Original Image</button>
+                    </div>
+                </div>
 
                 <div id="statusText" class="mt-2 h-6 block text-zinc-500">
                     Loading depth model, please wait...
@@ -118,7 +128,8 @@
             pixelBuffer: null, // WebGPU buffer for original pixels
             depthMap: {
                 values: null, // float32 array of depth values, 0 to 1
-                buffer: null // WebGPU buffer with the same stuff
+                buffer: null, // WebGPU buffer with the same stuff
+                imageData: null // For displaying and saving the depth map
                 // we need both because when we click the image we need to get the depth value in js
             },
             // Focus and effect settings
@@ -162,6 +173,7 @@
                     this.pixelBuffer = null;
                 }
                 this.depthMap.values = null;
+                this.depthMap.imageData = null;
 
                 if (this.depthMap.buffer) {
                     this.depthMap.buffer.destroy();
@@ -170,6 +182,7 @@
 
                 setControlsEnabled(false);
                 clickIndicator.style.display = 'none';
+                depthMapContainer.style.display = 'none';
             }
         };
 
@@ -199,6 +212,10 @@
 
         // UI element references
         const imageUpload = document.getElementById('imageUpload');
+        const depthMapCanvas = document.getElementById('depthMapCanvas');
+        const depthMapContainer = document.getElementById('depthMapContainer');
+        const downloadDepthMapBtn = document.getElementById('downloadDepthMap');
+        const downloadOriginalImageBtn = document.getElementById('downloadOriginalImage');
         const originalCanvas = document.getElementById('originalCanvas');
         const loadingOverlay = document.getElementById('loadingOverlay');
         const blurStrength = document.getElementById('blurStrength');
@@ -623,6 +640,78 @@
             statusText.style.visibility = visible ? 'visible' : 'hidden';
         }
 
+        // Function to render the depth map to canvas for visualization
+        function renderDepthMap() {
+            if (!state.depthMap || !state.depthMap.values) return;
+
+            // Show the depth map container
+            depthMapContainer.style.display = 'block';
+            
+            // Set canvas dimensions
+            const width = state.dimensions.width;
+            const height = state.dimensions.height;
+            depthMapCanvas.width = width;
+            depthMapCanvas.height = height;
+            
+            // Get canvas context
+            const ctx = depthMapCanvas.getContext('2d');
+            const imageData = ctx.createImageData(width, height);
+            
+            // Convert depth values (0-1) to grayscale image
+            for (let i = 0; i < state.depthMap.values.length; i++) {
+                const value = Math.floor(state.depthMap.values[i] * 255);
+                const idx = i * 4;
+                imageData.data[idx] = value;     // R
+                imageData.data[idx + 1] = value; // G
+                imageData.data[idx + 2] = value; // B
+                imageData.data[idx + 3] = 255;   // A (fully opaque)
+            }
+            
+            // Draw to canvas
+            ctx.putImageData(imageData, 0, 0);
+        }
+        
+        // Function to download the depth map as PNG
+        function downloadDepthMap() {
+            if (!state.depthMap || !state.depthMap.values) {
+                updateStatus('No depth map available');
+                return;
+            }
+            
+            // Create link for download
+            const link = document.createElement('a');
+            link.download = 'depth_map.png';
+            link.href = depthMapCanvas.toDataURL('image/png');
+            link.click();
+        }
+        
+        // Function to download the original image
+        function downloadOriginalImage() {
+            if (!state.dimensions.width || !state.dimensions.height) {
+                updateStatus('No image available');
+                return;
+            }
+            
+            // Create a temporary canvas with the original image data
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = state.dimensions.width;
+            tempCanvas.height = state.dimensions.height;
+            const ctx = tempCanvas.getContext('2d');
+            
+            // Draw the original image from our canvas
+            ctx.drawImage(originalCanvas, 0, 0);
+            
+            // Create download link
+            const link = document.createElement('a');
+            link.download = 'original_image.png';
+            link.href = tempCanvas.toDataURL('image/png');
+            link.click();
+        }
+        
+        // Add event listeners for download buttons
+        downloadDepthMapBtn.addEventListener('click', downloadDepthMap);
+        downloadOriginalImageBtn.addEventListener('click', downloadOriginalImage);
+
         // Add event listeners for the sliders to reapply effect when changed
         async function updateEffect() {
             if (!state.focus.x || !state.focus.y) return;
@@ -699,7 +788,7 @@
 
                 // Enable click handling if model is ready
                 if (!state.model.loading) {
-                    originalCanvas.style.cursor = 'crosshair';
+                    // originalCanvas.style.cursor = 'crosshair';
                     updateStatus('Click anywhere on the image to set focus point.');
                 }
 
@@ -732,6 +821,9 @@
                     });
                     state.webgpu.device.queue.writeBuffer(state.depthMap.buffer, 0, state.depthMap.values);
                 }
+                
+                // Render the depth map to canvas for visualization
+                renderDepthMap();
 
                 updateStatus('Ready! Click anywhere to set focus point.');
             } catch (error) {
