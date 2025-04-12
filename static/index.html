@@ -72,16 +72,7 @@
                         <div class="spinner"></div>
                     </div>
                 </div>
-                
-                <!-- Added depth map display and download button -->
-                <div class="mt-4" id="depthMapContainer" style="display: none;">
-                    <h3 class="text-lg font-medium mb-2">Depth Map</h3>
-                    <canvas id="depthMapCanvas" class="w-full border border-gray-300"></canvas>
-                    <div class="mt-2 flex gap-2">
-                        <button id="downloadDepthMap" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">Download Depth Map</button>
-                        <button id="downloadOriginalImage" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">Download Original Image</button>
-                    </div>
-                </div>
+
 
                 <div id="statusText" class="mt-2 h-6 block text-zinc-500">
                     Loading depth model, please wait...
@@ -128,9 +119,8 @@
             pixelBuffer: null, // WebGPU buffer for original pixels
             depthMap: {
                 values: null, // float32 array of depth values, 0 to 1
-                buffer: null, // WebGPU buffer with the same stuff
-                imageData: null // For displaying and saving the depth map
-                // we need both because when we click the image we need to get the depth value in js
+                buffer: null  // WebGPU buffer with the same stuff
+                // We need the values for the bokeh effect and when we click to set the focus point
             },
             // Focus and effect settings
             focus: {
@@ -151,10 +141,10 @@
                 pipelines: {
                     coc: null,
                     toLinear: null,
-                    blurV: null,
-                    blurH: null,
+                    blurDirectional: null,
                     renderToCanvas: null
-                }
+                },
+                // No pre-allocated offsets - created dynamically in applyBokeh
             },
             model: {
                 estimator: null,
@@ -173,7 +163,6 @@
                     this.pixelBuffer = null;
                 }
                 this.depthMap.values = null;
-                this.depthMap.imageData = null;
 
                 if (this.depthMap.buffer) {
                     this.depthMap.buffer.destroy();
@@ -182,7 +171,6 @@
 
                 setControlsEnabled(false);
                 clickIndicator.style.display = 'none';
-                depthMapContainer.style.display = 'none';
             }
         };
 
@@ -212,10 +200,6 @@
 
         // UI element references
         const imageUpload = document.getElementById('imageUpload');
-        const depthMapCanvas = document.getElementById('depthMapCanvas');
-        const depthMapContainer = document.getElementById('depthMapContainer');
-        const downloadDepthMapBtn = document.getElementById('downloadDepthMap');
-        const downloadOriginalImageBtn = document.getElementById('downloadOriginalImage');
         const originalCanvas = document.getElementById('originalCanvas');
         const loadingOverlay = document.getElementById('loadingOverlay');
         const blurStrength = document.getElementById('blurStrength');
@@ -283,11 +267,10 @@
             });
 
             // Load and compile all shaders
-            const [cocCode, toLinearCode, blurHLinearCode, blurVLinearCode, fullscreenQuadCode] = await Promise.all([
+            const [cocCode, toLinearCode, blurDirectionalCode, fullscreenQuadCode] = await Promise.all([
                 fetch('coc.wgsl').then(r => r.text()),
                 fetch('convert_to_linear.wgsl').then(r => r.text()),
-                fetch('blur_h_linear.wgsl').then(r => r.text()),
-                fetch('blur_v_linear.wgsl').then(r => r.text()),
+                fetch('blur_directional.wgsl').then(r => r.text()),
                 fetch('fullscreen_quad.wgsl').then(r => r.text())
             ]);
 
@@ -299,17 +282,15 @@
                 code: toLinearCode
             });
 
-            const blurHShaderModule = state.webgpu.device.createShaderModule({
-                code: blurHLinearCode
-            });
-
-            const blurVShaderModule = state.webgpu.device.createShaderModule({
-                code: blurVLinearCode
+            const blurDirectionalShaderModule = state.webgpu.device.createShaderModule({
+                code: blurDirectionalCode
             });
 
             const fullscreenQuadModule = state.webgpu.device.createShaderModule({
                 code: fullscreenQuadCode
             });
+
+            // Offset buffers are now created dynamically in applyBokeh
 
             // Create pipelines for all passes and store in state
             state.webgpu.pipelines.coc = state.webgpu.device.createComputePipeline({
@@ -328,18 +309,10 @@
                 }
             });
 
-            state.webgpu.pipelines.blurH = state.webgpu.device.createComputePipeline({
+            state.webgpu.pipelines.blurDirectional = state.webgpu.device.createComputePipeline({
                 layout: 'auto',
                 compute: {
-                    module: blurHShaderModule,
-                    entryPoint: 'main'
-                }
-            });
-
-            state.webgpu.pipelines.blurV = state.webgpu.device.createComputePipeline({
-                layout: 'auto',
-                compute: {
-                    module: blurVShaderModule,
+                    module: blurDirectionalShaderModule,
                     entryPoint: 'main'
                 }
             });
@@ -397,24 +370,56 @@
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
             });
 
-            // Create params buffer with width, height and shape
+            // Calculate maxCoc and number of samples
+            let maxCoc = 0.001 * 0.5 * (canvas.width + canvas.height) * Math.pow(2, state.effect.blurStrength);
+            const numSamples = Math.ceil(maxCoc / 2); // Set number of samples to half of max CoC
+
             const shaderParamsBuffer = state.webgpu.device.createBuffer({
-                size: 16, // 3 u32s (width, height, shape) + padding to 16 bytes
+                size: 16, // 3 u32s (width, height, numSamples) + padding to 16 bytes
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
-            // Convert shape value to uint: 0 = circle, 1 = square, 2 = hexagon
-            let shapeValue = 0;
-            if (bokehShape.value === 'square') shapeValue = 1;
-            else if (bokehShape.value === 'hexagon') shapeValue = 2;
 
             // Update effect state with current values from UI
-            state.effect.shape = bokehShape.value;
+            state.effect.shape = bokehShape.value; // Not using this directly now, but keeping for compatibility
             state.effect.blurStrength = parseFloat(blurStrength.value);
             state.effect.depthOfField = parseFloat(depthOfField.value);
             state.effect.backgroundOnly = backgroundOnly.checked;
 
-            const shaderParamsArray = new Uint32Array([canvas.width, canvas.height, shapeValue, 0]); // last 0 is padding
+            const shaderParamsArray = new Uint32Array([canvas.width, canvas.height, numSamples, 0]); // last 0 is padding
             state.webgpu.device.queue.writeBuffer(shaderParamsBuffer, 0, shaderParamsArray);
+
+            // Generate offsets for horizontal and vertical blur
+            function generateOffsets(angle, numSamples) {
+                const offsetsArray = new Float32Array(numSamples * 2);
+                const angleRad = angle * Math.PI / 180;
+                const dx = Math.cos(angleRad);
+                const dy = Math.sin(angleRad);
+
+                for (let i = 0; i < numSamples; i++) {
+                    const t = (i / (numSamples - 1)) * 2.0 - 1.0;
+                    offsetsArray[i * 2] = dx * t;     // x component
+                    offsetsArray[i * 2 + 1] = dy * t;   // y component
+                }
+                return offsetsArray;
+            }
+
+            const horizontalOffsets = generateOffsets(0, numSamples);
+            const verticalOffsets = generateOffsets(90, numSamples);
+
+            // Create the GPU buffers for the offsets
+            const offsetBufferSize = numSamples * 2 * 4; // 2 floats per sample, 4 bytes per float
+            const horizontalOffsetsBuffer = state.webgpu.device.createBuffer({
+                size: offsetBufferSize,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+            const verticalOffsetsBuffer = state.webgpu.device.createBuffer({
+                size: offsetBufferSize,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+
+            // Write the offsets to the GPU
+            state.webgpu.device.queue.writeBuffer(horizontalOffsetsBuffer, 0, horizontalOffsets);
+            state.webgpu.device.queue.writeBuffer(verticalOffsetsBuffer, 0, verticalOffsets);
 
             // Create conversion params buffer (just width and height)
             const convertParamsBuffer = state.webgpu.device.createBuffer({
@@ -429,7 +434,7 @@
                 size: 16, // 4 floats: focus_depth, max_coc, depth_of_field, background_only
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
-            const maxCoc = 0.001 * 0.5 * (canvas.width + canvas.height) * Math.pow(2, state.effect.blurStrength);
+            // Use the previously calculated maxCoc
             const cocParamsArray = new Float32Array([
                 focusDepth,
                 maxCoc,
@@ -459,25 +464,27 @@
                 ],
             });
 
-            // Bind group for horizontal blur in linear space
+            // Bind group for horizontal (0°) blur pass in linear space
             const blurHBindGroup = state.webgpu.device.createBindGroup({
-                layout: state.webgpu.pipelines.blurH.getBindGroupLayout(0),
+                layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: { buffer: linearBuffer } },
                     { binding: 1, resource: { buffer: intermediateLinearBuffer } },
                     { binding: 2, resource: { buffer: shaderParamsBuffer } },
                     { binding: 3, resource: { buffer: cocBuffer } },
+                    { binding: 4, resource: { buffer: horizontalOffsetsBuffer } },
                 ],
             });
 
-            // Bind group for vertical blur in linear space
+            // Bind group for vertical (90°) blur pass in linear space
             const blurVBindGroup = state.webgpu.device.createBindGroup({
-                layout: state.webgpu.pipelines.blurV.getBindGroupLayout(0),
+                layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: { buffer: intermediateLinearBuffer } },
                     { binding: 1, resource: { buffer: outputLinearBuffer } },
                     { binding: 2, resource: { buffer: shaderParamsBuffer } },
                     { binding: 3, resource: { buffer: cocBuffer } },
+                    { binding: 4, resource: { buffer: verticalOffsetsBuffer } },
                 ],
             });
 
@@ -513,9 +520,9 @@
             );
             toLinearPass.end();
 
-            // Horizontal blur pass (in linear space)
+            // Horizontal (0°) directional blur pass (in linear space)
             const blurHPass = commandEncoder.beginComputePass();
-            blurHPass.setPipeline(state.webgpu.pipelines.blurH);
+            blurHPass.setPipeline(state.webgpu.pipelines.blurDirectional);
             blurHPass.setBindGroup(0, blurHBindGroup);
             blurHPass.dispatchWorkgroups(
                 Math.ceil(canvas.width / 8),
@@ -523,9 +530,9 @@
             );
             blurHPass.end();
 
-            // Vertical blur pass (in linear space)
+            // Vertical (90°) directional blur pass (in linear space)
             const blurVPass = commandEncoder.beginComputePass();
-            blurVPass.setPipeline(state.webgpu.pipelines.blurV);
+            blurVPass.setPipeline(state.webgpu.pipelines.blurDirectional);
             blurVPass.setBindGroup(0, blurVBindGroup);
             blurVPass.dispatchWorkgroups(
                 Math.ceil(canvas.width / 8),
@@ -640,78 +647,6 @@
             statusText.style.visibility = visible ? 'visible' : 'hidden';
         }
 
-        // Function to render the depth map to canvas for visualization
-        function renderDepthMap() {
-            if (!state.depthMap || !state.depthMap.values) return;
-
-            // Show the depth map container
-            depthMapContainer.style.display = 'block';
-            
-            // Set canvas dimensions
-            const width = state.dimensions.width;
-            const height = state.dimensions.height;
-            depthMapCanvas.width = width;
-            depthMapCanvas.height = height;
-            
-            // Get canvas context
-            const ctx = depthMapCanvas.getContext('2d');
-            const imageData = ctx.createImageData(width, height);
-            
-            // Convert depth values (0-1) to grayscale image
-            for (let i = 0; i < state.depthMap.values.length; i++) {
-                const value = Math.floor(state.depthMap.values[i] * 255);
-                const idx = i * 4;
-                imageData.data[idx] = value;     // R
-                imageData.data[idx + 1] = value; // G
-                imageData.data[idx + 2] = value; // B
-                imageData.data[idx + 3] = 255;   // A (fully opaque)
-            }
-            
-            // Draw to canvas
-            ctx.putImageData(imageData, 0, 0);
-        }
-        
-        // Function to download the depth map as PNG
-        function downloadDepthMap() {
-            if (!state.depthMap || !state.depthMap.values) {
-                updateStatus('No depth map available');
-                return;
-            }
-            
-            // Create link for download
-            const link = document.createElement('a');
-            link.download = 'depth_map.png';
-            link.href = depthMapCanvas.toDataURL('image/png');
-            link.click();
-        }
-        
-        // Function to download the original image
-        function downloadOriginalImage() {
-            if (!state.dimensions.width || !state.dimensions.height) {
-                updateStatus('No image available');
-                return;
-            }
-            
-            // Create a temporary canvas with the original image data
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = state.dimensions.width;
-            tempCanvas.height = state.dimensions.height;
-            const ctx = tempCanvas.getContext('2d');
-            
-            // Draw the original image from our canvas
-            ctx.drawImage(originalCanvas, 0, 0);
-            
-            // Create download link
-            const link = document.createElement('a');
-            link.download = 'original_image.png';
-            link.href = tempCanvas.toDataURL('image/png');
-            link.click();
-        }
-        
-        // Add event listeners for download buttons
-        downloadDepthMapBtn.addEventListener('click', downloadDepthMap);
-        downloadOriginalImageBtn.addEventListener('click', downloadOriginalImage);
-
         // Add event listeners for the sliders to reapply effect when changed
         async function updateEffect() {
             if (!state.focus.x || !state.focus.y) return;
@@ -821,9 +756,8 @@
                     });
                     state.webgpu.device.queue.writeBuffer(state.depthMap.buffer, 0, state.depthMap.values);
                 }
-                
-                // Render the depth map to canvas for visualization
-                renderDepthMap();
+
+
 
                 updateStatus('Ready! Click anywhere to set focus point.');
             } catch (error) {

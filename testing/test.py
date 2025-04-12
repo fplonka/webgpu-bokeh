@@ -3,7 +3,7 @@ import numpy as np
 from PIL import Image
 import os
 from typing import Tuple
-from numba import njit, prange, parallel
+from numba import njit, prange
 
 def read_image_to_rgba_uint32(image_path):
     """
