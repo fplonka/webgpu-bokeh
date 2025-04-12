@@ -116,6 +116,22 @@
         let originalImage = null;
         let depthData = null;
 
+        function setControlsEnabled(enabled) {
+            blurStrength.disabled = !enabled;
+            blurStrengthValue.disabled = !enabled;
+            depthOfField.disabled = !enabled;
+            depthOfFieldValue.disabled = !enabled;
+            bokehShape.disabled = !enabled;
+            backgroundOnly.disabled = !enabled;
+        }
+
+        function resetUIState() {
+            setControlsEnabled(false);
+            clickIndicator.style.display = 'none';
+            depthData = null;
+            originalPixels = null;
+        }
+
         // Start loading the depth model
         let depthEstimator = null;
         let modelLoading = true;
@@ -125,6 +141,10 @@
             depthEstimator = model;
             modelLoading = false;
             updateStatus('Click anywhere on the image to set focus point.');
+            if (originalImage) {
+                // If an image was already loaded, enable click handling
+                originalCanvas.style.cursor = 'crosshair';
+            }
         }).catch(error => {
             console.error('Error loading model:', error);
             updateStatus('Error loading model. Please refresh the page.');
@@ -361,10 +381,6 @@
         const statusText = document.getElementById('statusText');
         const controls = document.querySelectorAll('input[type="range"], input[type="number"], input[type="checkbox"], select');
 
-        function setControlsEnabled(enabled) {
-            controls.forEach(control => control.disabled = !enabled);
-        }
-
         function updateStatus(text, visible = true) {
             statusText.textContent = text;
             statusText.style.visibility = visible ? 'visible' : 'hidden';
@@ -436,6 +452,7 @@
             const file = event.target.files[0];
             if (!file) return;
 
+            resetUIState();
             loadingOverlay.style.display = 'flex';
             updateStatus('Loading image...');
 
@@ -447,6 +464,12 @@
                 // Wait for image to load
                 await new Promise(r => originalImage.onload = r);
                 drawImageToCanvas(originalCanvas, originalImage);
+
+                // Enable click handling if model is ready
+                if (!modelLoading) {
+                    originalCanvas.style.cursor = 'crosshair';
+                    updateStatus('Click anywhere on the image to set focus point.');
+                }
 
                 // Wait for model if still loading
                 if (modelLoading) {

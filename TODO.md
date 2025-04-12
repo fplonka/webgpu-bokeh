@@ -8,4 +8,5 @@
 - make things grayed out / reset on new image upload
 - do we handle correctly uploading image when loading depth model?
 - drop go code
+    - inline wgsl
 - cloudflare deployment

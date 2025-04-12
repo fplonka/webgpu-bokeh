@@ -74,7 +74,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Bokeh blur: weighted average based on CoC
     for (var dy = -radius; dy <= radius; dy++) {
         for (var dx = -radius; dx <= radius; dx++) {
-            let sampleX = i32(x) + dx;
+            let sampleX = i32(x) + dx; // TODO: unsigned?
             let sampleY = i32(y) + dy;
 
             // Skip samples outside the image
@@ -86,16 +86,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let sampleCoC = cocBuffer[sampleIdx];
             
             // Distance based on shape
-            var dist: f32;
             let fdx = f32(dx);
             let fdy = f32(dy);
             
             var isInShape = false;
             if params.shape == 0u { // circle
-                dist = sqrt(fdx * fdx + fdy * fdy);
+                let dist = sqrt(fdx * fdx + fdy * fdy);
                 isInShape = dist <= sampleCoC;
             } else if params.shape == 1u { // square
-                dist = max(abs(fdx), abs(fdy));
+                let dist = max(abs(fdx), abs(fdy));
                 isInShape = dist <= sampleCoC;
             } else { // hexagon
                 // For unit hexagon (r=1), check if point is inside using the formula:
@@ -109,12 +108,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             if !isInShape {
                 continue;
             }
-            
-            // Weight based on distance and CoC
-            var weight = 1.0;
 
-            sumColor += unpackRGBA(inputImage[sampleIdx]) * weight;
-            sumWeight += weight;
+            sumColor += unpackRGBA(inputImage[sampleIdx]);
+            sumWeight += 1;
         }
     }
 
