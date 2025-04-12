@@ -1,0 +1,72 @@
+// Vertex shader for rendering a fullscreen quad
+struct VertexOutput {
+  @builtin(position) Position : vec4f,
+  @location(0) fragUV : vec2f,
+}
+
+@vertex
+fn vertex_main(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
+  // Fullscreen quad vertices
+  const pos = array(
+    vec2( 1.0,  1.0),  // Bottom right
+    vec2( 1.0, -1.0),  // Top right
+    vec2(-1.0, -1.0),  // Top left
+    vec2( 1.0,  1.0),  // Bottom right
+    vec2(-1.0, -1.0),  // Top left
+    vec2(-1.0,  1.0),  // Bottom left
+  );
+
+  const uv = array(
+    vec2(1.0, 1.0),  // Bottom right
+    vec2(1.0, 0.0),  // Top right
+    vec2(0.0, 0.0),  // Top left
+    vec2(1.0, 1.0),  // Bottom right
+    vec2(0.0, 0.0),  // Top left
+    vec2(0.0, 1.0),  // Bottom left
+  );
+
+  var output : VertexOutput;
+  output.Position = vec4(pos[VertexIndex], 0.0, 1.0);
+  output.fragUV = vec2(uv[VertexIndex].x, 1.0 - uv[VertexIndex].y);
+  return output;
+}
+
+// Fragment shader for converting linear RGB to sRGB and displaying
+struct Params {
+  width: u32,
+  height: u32,
+}
+
+@group(0) @binding(0) var<storage, read> inputLinear: array<vec4<f32>>;
+@group(0) @binding(1) var<uniform> params: Params;
+
+// Convert linear RGB to sRGB
+fn linearToSrgb(x: f32) -> f32 {
+  if x <= 0.0031308 {
+    return 12.92 * x;
+  } else {
+    return 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+  }
+}
+
+@fragment
+fn fragment_main(@location(0) fragUV : vec2f) -> @location(0) vec4f {
+  let x = u32(fragUV.x * f32(params.width));
+  let y = u32(fragUV.y * f32(params.height));
+  
+  // Bounds check
+  if (x >= params.width || y >= params.height) {
+    return vec4f(0.0, 0.0, 0.0, 1.0);
+  }
+  
+  let idx = y * params.width + x;
+  let linearColor = inputLinear[idx];
+  
+  // Convert linear to sRGB
+  return vec4f(
+    linearToSrgb(linearColor.r),
+    linearToSrgb(linearColor.g),
+    linearToSrgb(linearColor.b),
+    linearColor.a
+  );
+}

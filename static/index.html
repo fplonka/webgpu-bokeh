@@ -111,45 +111,92 @@
     </div>
 
     <script type="module">
-        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.2/dist/transformers.min.js';
+        // Updates when the user uploads an image or changes setting (clicks to set focus point, changes blur strength etc)
+        const state = {
+            // Image and depth data
+            dimensions: { width: 0, height: 0 },
+            pixelBuffer: null, // WebGPU buffer for original pixels
+            depthMap: {
+                values: null, // float32 array of depth values, 0 to 1
+                buffer: null // WebGPU buffer with the same stuff
+                // we need both because when we click the image we need to get the depth value in js
+            },
+            // Focus and effect settings
+            focus: {
+                x: null,
+                y: null,
+                depth: null
+            },
+            effect: {
+                blurStrength: 4,
+                depthOfField: 0.1,
+                shape: 'circle',
+                backgroundOnly: true
+            },
+            // Model and rendering state
+            webgpu: {
+                device: null,
+                pipelines: {
+                    coc: null,
+                    toLinear: null,
+                    blurV: null,
+                    blurH: null,
+                    toSrgb: null
+                }
+            },
+            model: {
+                estimator: null,
+                loading: true
+            },
 
-        let originalImage = null;
-        let depthData = null;
+            reset: function () {
+                this.focus.x = null;
+                this.focus.y = null;
+                this.focus.depth = null;
 
-        function setControlsEnabled(enabled) {
-            blurStrength.disabled = !enabled;
-            blurStrengthValue.disabled = !enabled;
-            depthOfField.disabled = !enabled;
-            depthOfFieldValue.disabled = !enabled;
-            bokehShape.disabled = !enabled;
-            backgroundOnly.disabled = !enabled;
+                this.dimensions.width = 0;
+                this.dimensions.height = 0;
+                if (this.pixelBuffer) {
+                    this.pixelBuffer.destroy();
+                    this.pixelBuffer = null;
+                }
+                this.depthMap.values = null;
+
+                if (this.depthMap.buffer) {
+                    this.depthMap.buffer.destroy();
+                    this.depthMap.buffer = null;
+                }
+
+                setControlsEnabled(false);
+                clickIndicator.style.display = 'none';
+            }
+        };
+
+        // js cringe: make state not extensible with new fields etc
+        function recursiveSeal(obj) {
+            Object.seal(obj);
+            for (const key of Object.getOwnPropertyNames(obj)) {
+                if (typeof obj[key] === 'object' && obj[key] !== null) {
+                    recursiveSeal(obj[key]);
+                }
+            }
         }
-
-        function resetUIState() {
-            setControlsEnabled(false);
-            clickIndicator.style.display = 'none';
-            depthData = null;
-            originalPixels = null;
-        }
+        // recursiveSeal(state);
 
         // Start loading the depth model
-        let depthEstimator = null;
-        let modelLoading = true;
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.2/dist/transformers.min.js';
         pipeline('depth-estimation', 'onnx-community/depth-anything-v2-base', {
             device: 'webgpu',
         }).then(model => {
-            depthEstimator = model;
-            modelLoading = false;
+            state.model.estimator = model;
+            state.model.loading = false;
             updateStatus('Click anywhere on the image to set focus point.');
-            if (originalImage) {
-                // If an image was already loaded, enable click handling
-                originalCanvas.style.cursor = 'crosshair';
-            }
         }).catch(error => {
             console.error('Error loading model:', error);
             updateStatus('Error loading model. Please refresh the page.');
         });
 
+        // UI element references
         const imageUpload = document.getElementById('imageUpload');
         const originalCanvas = document.getElementById('originalCanvas');
         const loadingOverlay = document.getElementById('loadingOverlay');
@@ -161,34 +208,30 @@
         const backgroundOnly = document.getElementById('backgroundOnly');
         const clickIndicator = document.getElementById('clickIndicator');
 
-        let device = null;
-        let canvasContext = null;  // WebGPU canvas context
-        let presentationFormat = null;  // Preferred canvas format
-        let renderSampler = null;  // Sampler for the render pass
-        let cocPipeline = null;
-        let toLinearPipeline = null;
-        let blurHPipeline = null;
-        let blurVPipeline = null;
-        let toSrgbPipeline = null;
-        let renderPipeline = null;  // Pipeline for rendering to screen
-        let toLinearBindGroup = null;
-        let blurHBindGroup = null;
-        let blurVBindGroup = null;
-        let toSrgbBindGroup = null;
-        let originalPixels = null;
+        // UI controls helper function
+        function setControlsEnabled(enabled) {
+            blurStrength.disabled = !enabled;
+            blurStrengthValue.disabled = !enabled;
+            depthOfField.disabled = !enabled;
+            depthOfFieldValue.disabled = !enabled;
+            bokehShape.disabled = !enabled;
+            backgroundOnly.disabled = !enabled;
+        }
 
-        // Sync number inputs with range inputs
+        // TODO: max val??
         blurStrength.addEventListener('input', (e) => {
             blurStrengthValue.value = e.target.value;
         });
         blurStrengthValue.addEventListener('input', (e) => {
             blurStrength.value = e.target.value;
+            updateEffect();
         });
         depthOfField.addEventListener('input', (e) => {
             depthOfFieldValue.value = e.target.value;
         });
         depthOfFieldValue.addEventListener('input', (e) => {
             depthOfField.value = e.target.value;
+            updateEffect();
         });
 
         async function initWebGPU() {
@@ -196,50 +239,65 @@
                 throw new Error("WebGPU not supported");
             }
 
-            const adapter = await navigator.gpu.requestAdapter();
+            const adapter = await navigator.gpu.requestAdapter({
+                featureLevel: 'compatibility'
+            });
             if (!adapter) {
                 throw new Error("No GPU adapter found");
             }
 
-            device = await adapter.requestDevice({
+            // Initialize the device
+            state.webgpu.device = await adapter.requestDevice({
                 requiredLimits: {
                     maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
                     maxBufferSize: adapter.limits.maxBufferSize
                 }
             });
 
+            // Configure the canvas context for WebGPU
+            const canvas = originalCanvas;
+            state.webgpu.context = canvas.getContext('webgpu');
+            const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+            state.webgpu.context.configure({
+                device: state.webgpu.device,
+                format: presentationFormat,
+                alphaMode: 'premultiplied'
+            });
+
+            // Store presentation format for later use
+            state.webgpu.presentationFormat = presentationFormat;
+
             // Load and compile all shaders
-            const [cocCode, toLinearCode, blurHLinearCode, blurVLinearCode, toSrgbCode, renderCode] = await Promise.all([
+            const [cocCode, toLinearCode, blurHLinearCode, blurVLinearCode, fullscreenQuadCode] = await Promise.all([
                 fetch('coc.wgsl').then(r => r.text()),
                 fetch('convert_to_linear.wgsl').then(r => r.text()),
                 fetch('blur_h_linear.wgsl').then(r => r.text()),
                 fetch('blur_v_linear.wgsl').then(r => r.text()),
-                fetch('convert_to_srgb.wgsl').then(r => r.text()),
-                fetch('render_to_screen.wgsl').then(r => r.text())
+                fetch('fullscreen_quad.wgsl').then(r => r.text())
             ]);
 
-            const cocShaderModule = device.createShaderModule({
+            const cocShaderModule = state.webgpu.device.createShaderModule({
                 code: cocCode
             });
 
-            const toLinearShaderModule = device.createShaderModule({
+            const toLinearShaderModule = state.webgpu.device.createShaderModule({
                 code: toLinearCode
             });
 
-            const blurHShaderModule = device.createShaderModule({
+            const blurHShaderModule = state.webgpu.device.createShaderModule({
                 code: blurHLinearCode
             });
 
-            const blurVShaderModule = device.createShaderModule({
+            const blurVShaderModule = state.webgpu.device.createShaderModule({
                 code: blurVLinearCode
             });
 
-            const toSrgbShaderModule = device.createShaderModule({
-                code: toSrgbCode
+            const fullscreenQuadModule = state.webgpu.device.createShaderModule({
+                code: fullscreenQuadCode
             });
 
-            // Create pipelines for all passes
-            cocPipeline = device.createComputePipeline({
+            // Create pipelines for all passes and store in state
+            state.webgpu.pipelines.coc = state.webgpu.device.createComputePipeline({
                 layout: 'auto',
                 compute: {
                     module: cocShaderModule,
@@ -247,7 +305,7 @@
                 }
             });
 
-            toLinearPipeline = device.createComputePipeline({
+            state.webgpu.pipelines.toLinear = state.webgpu.device.createComputePipeline({
                 layout: 'auto',
                 compute: {
                     module: toLinearShaderModule,
@@ -255,7 +313,7 @@
                 }
             });
 
-            blurHPipeline = device.createComputePipeline({
+            state.webgpu.pipelines.blurH = state.webgpu.device.createComputePipeline({
                 layout: 'auto',
                 compute: {
                     module: blurHShaderModule,
@@ -263,7 +321,7 @@
                 }
             });
 
-            blurVPipeline = device.createComputePipeline({
+            state.webgpu.pipelines.blurV = state.webgpu.device.createComputePipeline({
                 layout: 'auto',
                 compute: {
                     module: blurVShaderModule,
@@ -271,109 +329,61 @@
                 }
             });
 
-            toSrgbPipeline = device.createComputePipeline({
-                layout: 'auto',
-                compute: {
-                    module: toSrgbShaderModule,
-                    entryPoint: 'main'
-                }
-            });
-
-            // Create render pipeline for direct screen output
-            const renderShaderModule = device.createShaderModule({
-                code: renderCode
-            });
-
-            presentationFormat = navigator.gpu.getPreferredCanvasFormat();
-
-            renderPipeline = device.createRenderPipeline({
+            // Create render pipeline for direct rendering to canvas
+            state.webgpu.pipelines.renderToCanvas = state.webgpu.device.createRenderPipeline({
                 layout: 'auto',
                 vertex: {
-                    module: renderShaderModule,
-                    entryPoint: 'vertexMain'
+                    module: fullscreenQuadModule,
+                    entryPoint: 'vertex_main'
                 },
                 fragment: {
-                    module: renderShaderModule,
-                    entryPoint: 'fragmentMain',
-                    targets: [{ format: presentationFormat }]
+                    module: fullscreenQuadModule,
+                    entryPoint: 'fragment_main',
+                    targets: [
+                        {
+                            format: presentationFormat
+                        }
+                    ]
                 },
                 primitive: {
                     topology: 'triangle-list'
                 }
             });
 
-            // Create a sampler for the render pass
-            renderSampler = device.createSampler({
-                magFilter: 'linear',
-                minFilter: 'linear'
-            });
-
-            console.log("WebGPU initialized");
+            console.log("WebGPU initialized with direct canvas rendering");
         }
 
-        async function applyBokeh(canvas, focusDepth) {
-            if (!depthData || !originalPixels) {
-                console.error("No depth data or original image available");
-                return;
-            }
-
-            // Ensure WebGPU canvas context is active
-            if (!canvasContext) {
-                canvasContext = canvas.getContext('webgpu');
-                canvasContext.configure({
-                    device: device,
-                    format: presentationFormat,
-                    alphaMode: 'premultiplied'
-                });
-            }
-
-            const ctx = canvas.getContext('2d');
-
-            // Create input buffer and copy original pixels to it
-            const inputPackedBuffer = device.createBuffer({
-                size: originalPixels.byteLength,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            });
-            device.queue.writeBuffer(inputPackedBuffer, 0, originalPixels);
-
-            // Create depth map buffer
-            const depthValues = new Float32Array(depthData.values);
-            const depthBuffer = device.createBuffer({
-                size: depthValues.byteLength,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            });
-            device.queue.writeBuffer(depthBuffer, 0, depthValues);
+        async function applyBokeh() {
+            const canvas = originalCanvas;
+            const focusDepth = state.focus.depth;
 
             // Create CoC buffer
-            const cocBuffer = device.createBuffer({
-                size: depthValues.byteLength * 4, // float32 for each pixel
+            const cocBuffer = state.webgpu.device.createBuffer({
+                size: state.dimensions.width * state.dimensions.height * 4, // float32 for each pixel
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             });
 
             // Create buffers for linear space processing
-            const linearBuffer = device.createBuffer({
-                size: originalPixels.byteLength * 4, // vec4<f32> uses 16 bytes per pixel (4x more than packed u32)
+            const pixelCount = state.dimensions.width * state.dimensions.height;
+            const linearBufferSize = pixelCount * 16; // vec4<f32> uses 16 bytes per pixel
+
+            const linearBuffer = state.webgpu.device.createBuffer({
+                size: linearBufferSize,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
             });
 
-            const intermediateLinearBuffer = device.createBuffer({
-                size: originalPixels.byteLength * 4, // vec4<f32> uses 16 bytes per pixel
+            const intermediateLinearBuffer = state.webgpu.device.createBuffer({
+                size: linearBufferSize,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
             });
 
-            const outputLinearBuffer = device.createBuffer({
-                size: originalPixels.byteLength * 4, // vec4<f32> uses 16 bytes per pixel
+            const outputLinearBuffer = state.webgpu.device.createBuffer({
+                size: linearBufferSize,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-            });
-
-            // Create output packed buffer
-            const outputPackedBuffer = device.createBuffer({
-                size: originalPixels.byteLength,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
             });
 
             // Create params buffer with width, height and shape
-            const shaderParamsBuffer = device.createBuffer({
+            const shaderParamsBuffer = state.webgpu.device.createBuffer({
                 size: 16, // 3 u32s (width, height, shape) + padding to 16 bytes
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
@@ -381,42 +391,43 @@
             let shapeValue = 0;
             if (bokehShape.value === 'square') shapeValue = 1;
             else if (bokehShape.value === 'hexagon') shapeValue = 2;
+
+            // Update effect state with current values from UI
+            state.effect.shape = bokehShape.value;
+            state.effect.blurStrength = parseFloat(blurStrength.value);
+            state.effect.depthOfField = parseFloat(depthOfField.value);
+            state.effect.backgroundOnly = backgroundOnly.checked;
+
             const shaderParamsArray = new Uint32Array([canvas.width, canvas.height, shapeValue, 0]); // last 0 is padding
-            device.queue.writeBuffer(shaderParamsBuffer, 0, shaderParamsArray);
+            state.webgpu.device.queue.writeBuffer(shaderParamsBuffer, 0, shaderParamsArray);
 
             // Create conversion params buffer (just width and height)
-            const convertParamsBuffer = device.createBuffer({
+            const convertParamsBuffer = state.webgpu.device.createBuffer({
                 size: 16, // 2 u32s (width, height) + padding to 16 bytes
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
             const convertParamsArray = new Uint32Array([canvas.width, canvas.height, 0, 0]); // extra 0s for padding
-            device.queue.writeBuffer(convertParamsBuffer, 0, convertParamsArray);
+            state.webgpu.device.queue.writeBuffer(convertParamsBuffer, 0, convertParamsArray);
 
             // Create CoC params uniform buffer
-            const cocParamsBuffer = device.createBuffer({
+            const cocParamsBuffer = state.webgpu.device.createBuffer({
                 size: 16, // 4 floats: focus_depth, max_coc, depth_of_field, background_only
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
-            const maxCoc = 0.001 * 0.5 * (canvas.width + canvas.height) * Math.pow(2, parseFloat(blurStrength.value));
+            const maxCoc = 0.001 * 0.5 * (canvas.width + canvas.height) * Math.pow(2, state.effect.blurStrength);
             const cocParamsArray = new Float32Array([
                 focusDepth,
                 maxCoc,
-                parseFloat(depthOfField.value),
-                backgroundOnly.checked ? 1 : 0
+                state.effect.depthOfField,
+                state.effect.backgroundOnly ? 1 : 0
             ]);
-            device.queue.writeBuffer(cocParamsBuffer, 0, cocParamsArray);
-
-            // Create staging buffer for reading back the result
-            const stagingBuffer = device.createBuffer({
-                size: originalPixels.byteLength,
-                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-            });
+            state.webgpu.device.queue.writeBuffer(cocParamsBuffer, 0, cocParamsArray);
 
             // Create bind groups for all passes
-            const cocBindGroup = device.createBindGroup({
-                layout: cocPipeline.getBindGroupLayout(0),
+            const cocBindGroup = state.webgpu.device.createBindGroup({
+                layout: state.webgpu.pipelines.coc.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: { buffer: depthBuffer } },
+                    { binding: 0, resource: { buffer: state.depthMap.buffer } },
                     { binding: 1, resource: { buffer: cocBuffer } },
                     { binding: 2, resource: { buffer: shaderParamsBuffer } },
                     { binding: 3, resource: { buffer: cocParamsBuffer } },
@@ -424,18 +435,18 @@
             });
 
             // Bind group for converting to linear space
-            const toLinearBindGroup = device.createBindGroup({
-                layout: toLinearPipeline.getBindGroupLayout(0),
+            const toLinearBindGroup = state.webgpu.device.createBindGroup({
+                layout: state.webgpu.pipelines.toLinear.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: { buffer: inputPackedBuffer } },
+                    { binding: 0, resource: { buffer: state.pixelBuffer } },
                     { binding: 1, resource: { buffer: linearBuffer } },
                     { binding: 2, resource: { buffer: convertParamsBuffer } },
                 ],
             });
 
             // Bind group for horizontal blur in linear space
-            const blurHBindGroup = device.createBindGroup({
-                layout: blurHPipeline.getBindGroupLayout(0),
+            const blurHBindGroup = state.webgpu.device.createBindGroup({
+                layout: state.webgpu.pipelines.blurH.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: { buffer: linearBuffer } },
                     { binding: 1, resource: { buffer: intermediateLinearBuffer } },
@@ -445,8 +456,8 @@
             });
 
             // Bind group for vertical blur in linear space
-            const blurVBindGroup = device.createBindGroup({
-                layout: blurVPipeline.getBindGroupLayout(0),
+            const blurVBindGroup = state.webgpu.device.createBindGroup({
+                layout: state.webgpu.pipelines.blurV.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: { buffer: intermediateLinearBuffer } },
                     { binding: 1, resource: { buffer: outputLinearBuffer } },
@@ -455,22 +466,21 @@
                 ],
             });
 
-            // Bind group for converting back to sRGB
-            const toSrgbBindGroup = device.createBindGroup({
-                layout: toSrgbPipeline.getBindGroupLayout(0),
+            // Bind group for rendering to canvas
+            const renderToCanvasBindGroup = state.webgpu.device.createBindGroup({
+                layout: state.webgpu.pipelines.renderToCanvas.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: { buffer: outputLinearBuffer } },
-                    { binding: 1, resource: { buffer: outputPackedBuffer } },
-                    { binding: 2, resource: { buffer: convertParamsBuffer } },
+                    { binding: 1, resource: { buffer: convertParamsBuffer } },
                 ],
             });
 
             // Create and submit command buffer for all passes
-            const commandEncoder = device.createCommandEncoder();
+            const commandEncoder = state.webgpu.device.createCommandEncoder();
 
             // First pass: compute CoC values
             const cocPass = commandEncoder.beginComputePass();
-            cocPass.setPipeline(cocPipeline);
+            cocPass.setPipeline(state.webgpu.pipelines.coc);
             cocPass.setBindGroup(0, cocBindGroup);
             cocPass.dispatchWorkgroups(
                 Math.ceil(canvas.width / 8),
@@ -480,7 +490,7 @@
 
             // Convert to linear space
             const toLinearPass = commandEncoder.beginComputePass();
-            toLinearPass.setPipeline(toLinearPipeline);
+            toLinearPass.setPipeline(state.webgpu.pipelines.toLinear);
             toLinearPass.setBindGroup(0, toLinearBindGroup);
             toLinearPass.dispatchWorkgroups(
                 Math.ceil(canvas.width / 8),
@@ -490,7 +500,7 @@
 
             // Horizontal blur pass (in linear space)
             const blurHPass = commandEncoder.beginComputePass();
-            blurHPass.setPipeline(blurHPipeline);
+            blurHPass.setPipeline(state.webgpu.pipelines.blurH);
             blurHPass.setBindGroup(0, blurHBindGroup);
             blurHPass.dispatchWorkgroups(
                 Math.ceil(canvas.width / 8),
@@ -500,7 +510,7 @@
 
             // Vertical blur pass (in linear space)
             const blurVPass = commandEncoder.beginComputePass();
-            blurVPass.setPipeline(blurVPipeline);
+            blurVPass.setPipeline(state.webgpu.pipelines.blurV);
             blurVPass.setBindGroup(0, blurVBindGroup);
             blurVPass.dispatchWorkgroups(
                 Math.ceil(canvas.width / 8),
@@ -508,186 +518,105 @@
             );
             blurVPass.end();
 
-            // Convert back to sRGB space
-            const toSrgbPass = commandEncoder.beginComputePass();
-            toSrgbPass.setPipeline(toSrgbPipeline);
-            toSrgbPass.setBindGroup(0, toSrgbBindGroup);
-            toSrgbPass.dispatchWorkgroups(
-                Math.ceil(canvas.width / 8),
-                Math.ceil(canvas.height / 8)
-            );
-            toSrgbPass.end();
-
-            // Copy output to staging buffer
-            commandEncoder.copyBufferToBuffer(
-                outputPackedBuffer, 0,
-                stagingBuffer, 0,
-                originalPixels.byteLength
-            );
-
-            // Create a texture that will hold our final output
-            const outputTexture = device.createTexture({
-                size: [canvas.width, canvas.height],
-                format: 'rgba8unorm',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | 
-                       GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.STORAGE_BINDING
-            });
-            
-            // Submit all the compute work
-            device.queue.submit([commandEncoder.finish()]);
-            
-            // Create a new command encoder for rendering
-            const renderEncoder = device.createCommandEncoder();
-            
-            // Map the staging buffer for reading
-            await stagingBuffer.mapAsync(GPUMapMode.READ);
-            const outputData = new Uint8Array(stagingBuffer.getMappedRange());
-            
-            // Copy output data directly to texture
-            device.queue.writeTexture(
-                { texture: outputTexture },
-                outputData,
-                { bytesPerRow: canvas.width * 4 },
-                [canvas.width, canvas.height]
-            );
-            
-            // Unmap the buffer after we're done
-            stagingBuffer.unmap();
-
-            // Create a render pass to display the processed image
-            const renderPassDescriptor = {
+            // Final pass: Render directly to canvas
+            const renderPassEncoder = commandEncoder.beginRenderPass({
                 colorAttachments: [{
-                    view: canvasContext.getCurrentTexture().createView(),
+                    view: state.webgpu.context.getCurrentTexture().createView(),
+                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
                     loadOp: 'clear',
                     storeOp: 'store',
-                    clearValue: [0, 0, 0, 0]
-                }]
-            };
-
-            // Begin render pass with the new encoder
-            const renderPass = renderEncoder.beginRenderPass(renderPassDescriptor);
-            renderPass.setPipeline(renderPipeline);
-
-            // Now use the texture we created and filled earlier
-
-            // Create a bind group for the render pass
-            const renderBindGroup = device.createBindGroup({
-                layout: renderPipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: outputTexture.createView() },
-                    { binding: 1, resource: renderSampler }
-                ]
+                }],
             });
 
-            renderPass.setBindGroup(0, renderBindGroup);
-            renderPass.draw(3, 1, 0, 0); // Draw fullscreen triangle
-            renderPass.end();
+            renderPassEncoder.setPipeline(state.webgpu.pipelines.renderToCanvas);
+            renderPassEncoder.setBindGroup(0, renderToCanvasBindGroup);
+            renderPassEncoder.draw(6);  // 6 vertices for fullscreen quad
+            renderPassEncoder.end();
 
-            // Submit the render command
-            device.queue.submit([renderEncoder.finish()]);
+            // Submit all commands to GPU
+            state.webgpu.device.queue.submit([commandEncoder.finish()]);
 
             console.log("Bokeh effect applied with focus depth:", focusDepth, "max_coc:", maxCoc, "depth_of_field:", depthOfField.value);
         }
 
-        async function drawImageToCanvas(canvas, img) {
-            // Configure canvas for WebGPU if not already done
-            if (!canvasContext) {
-                canvasContext = canvas.getContext('webgpu');
-                canvasContext.configure({
-                    device,
-                    format: presentationFormat,
-                    alphaMode: 'premultiplied'
-                });
-            }
-
-            // Set canvas dimensions
+        function drawImageToCanvas(canvas, img) {
+            // Set dimensions
             canvas.width = img.width;
             canvas.height = img.height;
+            state.dimensions.width = canvas.width;
+            state.dimensions.height = canvas.height;
 
-            // Create ImageBitmap from the original image for WebGPU texture upload
-            const imageBitmap = await createImageBitmap(img);
+            // Get pixel data via temporary canvas (required for WebGPU)
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = img.width;
+            tempCanvas.height = img.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(img, 0, 0);
+            const pixelData = new Uint32Array(tempCtx.getImageData(0, 0, img.width, img.height).data.buffer);
 
-            // Create a texture to hold the original image
-            const originalTexture = device.createTexture({
-                size: [canvas.width, canvas.height],
-                format: 'rgba8unorm',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
-            });
-            
-            // Create a temporary texture to hold the image bitmap
-            const bitmapTexture = device.createTexture({
-                size: [canvas.width, canvas.height],
-                format: 'rgba8unorm',
-                usage: GPUTextureUsage.TEXTURE_BINDING | 
-                       GPUTextureUsage.COPY_SRC | 
-                       GPUTextureUsage.RENDER_ATTACHMENT | 
-                       GPUTextureUsage.COPY_DST
-            });
-            
-            // Copy the image bitmap directly to the texture
-            device.queue.copyExternalImageToTexture(
-                { source: imageBitmap },
-                { texture: bitmapTexture },
-                [canvas.width, canvas.height]
-            );
-            
-            // Create command encoder for copying
-            const uploadCommandEncoder = device.createCommandEncoder();
-            
-            // Copy from bitmap texture to our working texture
-            uploadCommandEncoder.copyTextureToTexture(
-                { texture: bitmapTexture },
-                { texture: originalTexture },
-                [canvas.width, canvas.height]
-            );
-            
-            device.queue.submit([uploadCommandEncoder.finish()]);
+            if (state.webgpu.device) {
+                // Create/update input buffer
+                if (state.pixelBuffer) state.pixelBuffer.destroy();
+                state.pixelBuffer = state.webgpu.device.createBuffer({
+                    size: img.width * img.height * 4,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+                state.webgpu.device.queue.writeBuffer(state.pixelBuffer, 0, pixelData);
 
-            // Create a render pass to display the original image
-            const displayCommandEncoder = device.createCommandEncoder();
-            const renderPassDescriptor = {
-                colorAttachments: [{
-                    view: canvasContext.getCurrentTexture().createView(),
-                    loadOp: 'clear',
-                    storeOp: 'store',
-                    clearValue: [0, 0, 0, 0]
-                }]
-            };
+                // Create uniform buffer for dimensions
+                const paramsBuffer = state.webgpu.device.createBuffer({
+                    size: 16,
+                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                });
+                state.webgpu.device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([img.width, img.height, 0, 0]));
 
-            const renderPass = displayCommandEncoder.beginRenderPass(renderPassDescriptor);
-            renderPass.setPipeline(renderPipeline);
+                // Create linear color space buffer
+                const linearBuffer = state.webgpu.device.createBuffer({
+                    size: img.width * img.height * 16,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
 
-            // Create a bind group for the render pass
-            const renderBindGroup = device.createBindGroup({
-                layout: renderPipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: originalTexture.createView() },
-                    { binding: 1, resource: renderSampler }
-                ]
-            });
+                // Convert to linear space
+                const computeEncoder = state.webgpu.device.createCommandEncoder();
+                const computePass = computeEncoder.beginComputePass();
+                computePass.setPipeline(state.webgpu.pipelines.toLinear);
+                computePass.setBindGroup(0, state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.toLinear.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: state.pixelBuffer } },
+                        { binding: 1, resource: { buffer: linearBuffer } },
+                        { binding: 2, resource: { buffer: paramsBuffer } },
+                    ],
+                }));
+                computePass.dispatchWorkgroups(Math.ceil(img.width / 8), Math.ceil(img.height / 8));
+                computePass.end();
+                state.webgpu.device.queue.submit([computeEncoder.finish()]);
 
-            renderPass.setBindGroup(0, renderBindGroup);
-            renderPass.draw(3, 1, 0, 0); // Draw fullscreen triangle
-            renderPass.end();
-
-            device.queue.submit([displayCommandEncoder.finish()]);
-
-            // Create a temporary canvas to get the pixel data
-            const pixelTempCanvas = document.createElement('canvas');
-            pixelTempCanvas.width = canvas.width;
-            pixelTempCanvas.height = canvas.height;
-            const pixelTempCtx = pixelTempCanvas.getContext('2d', { willReadFrequently: true });
-            pixelTempCtx.drawImage(img, 0, 0);
-
-            // Get the pixel data from the temporary canvas
-            const pixelImageData = pixelTempCtx.getImageData(0, 0, canvas.width, canvas.height);
-            originalPixels = new Uint32Array(pixelImageData.data.buffer);
-
-            // Return the texture for later use
-            return { originalTexture };
+                // Render to canvas
+                const renderEncoder = state.webgpu.device.createCommandEncoder();
+                const renderPass = renderEncoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: state.webgpu.context.getCurrentTexture().createView(),
+                        clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                });
+                renderPass.setPipeline(state.webgpu.pipelines.renderToCanvas);
+                renderPass.setBindGroup(0, state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.renderToCanvas.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: linearBuffer } },
+                        { binding: 1, resource: { buffer: paramsBuffer } },
+                    ],
+                }));
+                renderPass.draw(6);
+                renderPass.end();
+                state.webgpu.device.queue.submit([renderEncoder.finish()]);
+            }
         }
 
-        const statusText = document.getElementById('statusText');
+        // Already declared above
         const controls = document.querySelectorAll('input[type="range"], input[type="number"], input[type="checkbox"], select');
 
         function updateStatus(text, visible = true) {
@@ -696,23 +625,21 @@
         }
 
         // Add event listeners for the sliders to reapply effect when changed
-        let lastClickedPos = null;
-
         async function updateEffect() {
-            if (!lastClickedPos) return;
+            if (!state.focus.x || !state.focus.y) return;
 
             try {
                 updateStatus('processing...');
-                const { x, y } = lastClickedPos;
-                const index = y * depthData.width + x;
-                const depth = depthData.values[index];
 
-                await applyBokeh(originalCanvas, depth);
+                // Get depth at current focus point
+                const index = state.focus.y * state.dimensions.width + state.focus.x;
+                state.focus.depth = state.depthMap.values[index];
+
+                await applyBokeh();
                 updateStatus('processing...', false);
             } catch (error) {
                 console.error('Error applying bokeh:', error);
                 updateStatus('error applying effect', true);
-            } finally {
             }
         }
 
@@ -722,12 +649,13 @@
         backgroundOnly.addEventListener('change', updateEffect);
 
         originalCanvas.addEventListener('click', async (event) => {
-            if (!depthData) return;
+            if (!state.depthMap.values) return;
 
             const rect = originalCanvas.getBoundingClientRect();
             const scaleX = originalCanvas.width / rect.width;
             const scaleY = originalCanvas.height / rect.height;
 
+            // Calculate pixel coordinates from click position
             const x = Math.floor((event.clientX - rect.left) * scaleX);
             const y = Math.floor((event.clientY - rect.top) * scaleY);
 
@@ -736,13 +664,17 @@
             clickIndicator.style.left = (event.clientX - rect.left) + 'px';
             clickIndicator.style.top = (event.clientY - rect.top) + 'px';
 
-            lastClickedPos = { x, y };
-            const index = y * depthData.width + x;
-            const depth = depthData.values[index];
+            // Update focus state
+            state.focus.x = x;
+            state.focus.y = y;
 
-            console.log(`Depth at (${x}, ${y}): ${depth.toFixed(3)}`);
+            // Get depth at clicked position
+            const index = y * state.depthMap.width + x;
+            state.focus.depth = state.depthMap.values[index];
+
+            console.log(`Depth at (${x}, ${y}): ${state.focus.depth.toFixed(3)}`);
             updateStatus('processing...');
-            await applyBokeh(originalCanvas, depth);
+            await applyBokeh();
             updateStatus('processing...', false);
             setControlsEnabled(true);
         });
@@ -754,42 +686,53 @@
             const file = event.target.files[0];
             if (!file) return;
 
-            resetUIState();
+            state.reset(); // Reset state and clean up resources
             loadingOverlay.style.display = 'flex';
             updateStatus('Loading image...');
 
             try {
-                // Create a new image but don't display it yet
-                originalImage = new Image();
-                originalImage.src = URL.createObjectURL(file);
+                const image = new Image();
+                image.src = URL.createObjectURL(file);
 
                 // Wait for image to load
-                await new Promise(r => originalImage.onload = r);
-                drawImageToCanvas(originalCanvas, originalImage);
+                await new Promise(r => image.onload = r);
+                drawImageToCanvas(originalCanvas, image);
 
                 // Enable click handling if model is ready
-                if (!modelLoading) {
+                if (!state.model.loading) {
                     originalCanvas.style.cursor = 'crosshair';
                     updateStatus('Click anywhere on the image to set focus point.');
                 }
 
                 // Wait for model if still loading
-                if (modelLoading) {
-                    while (modelLoading) {
+                if (state.model.loading) {
+                    while (state.model.loading) {
                         await new Promise(r => setTimeout(r, 100));
                     }
                 }
 
                 // Get depth map
                 updateStatus('Estimating depth...');
-                const result = await depthEstimator(originalImage.src);
+                const result = await state.model.estimator(image.src);
 
                 // Convert depth map to our format
-                depthData = {
-                    width: result.depth.width,
-                    height: result.depth.height,
-                    values: new Float32Array(result.depth.data).map(v => v / 255)
+                state.depthMap = {
+                    width: state.dimensions.width,
+                    height: state.dimensions.height,
+                    values: new Float32Array(result.depth.data).map(v => v / 255),
+                    buffer: null
                 };
+
+                // Create the depth buffer once when we first get the depth map
+                if (state.webgpu.device && state.depthMap.values) {
+                    // Create a single reusable depth buffer
+                    const depthBufferSize = state.dimensions.width * state.dimensions.height * 4; // float32 values
+                    state.depthMap.buffer = state.webgpu.device.createBuffer({
+                        size: depthBufferSize,
+                        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                    });
+                    state.webgpu.device.queue.writeBuffer(state.depthMap.buffer, 0, state.depthMap.values);
+                }
 
                 updateStatus('Ready! Click anywhere to set focus point.');
             } catch (error) {

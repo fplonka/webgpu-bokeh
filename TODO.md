@@ -10,3 +10,5 @@
 - drop go code
     - inline wgsl
 - cloudflare deployment
+- updating drag setting through kb doesn't redraw (e.g. setting blur strength to 7 by typing)
+- brief debounce
