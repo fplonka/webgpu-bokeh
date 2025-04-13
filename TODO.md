@@ -16,4 +16,7 @@
     - textures!! -> less samples inshallah
 - drop the fucking bounds checks, texture clamp sampling
 
+- sample coc texture, or don't if f32 filtering not supported
+- only recompute coc when focus changes
+
 square: 300ms on big mariam image

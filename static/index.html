@@ -371,7 +371,7 @@
                     width: state.dimensions.width,
                     height: state.dimensions.height,
                 },
-                format: 'rgba16float',
+                format: 'rgba8unorm',
                 usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
             });
 
@@ -380,7 +380,7 @@
                     width: state.dimensions.width,
                     height: state.dimensions.height,
                 },
-                format: 'rgba16float',
+                format: 'rgba8unorm',
                 usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
             });
 
@@ -525,9 +525,6 @@
             );
             cocPass.end();
 
-            // No need for conversion to linear space anymore
-            // The rgba8unorm-srgb format handles this automatically
-
             // Horizontal (0°) directional blur pass (in linear space)
             const blurHPass = commandEncoder.beginComputePass();
             blurHPass.setPipeline(state.webgpu.pipelines.blurDirectional);
@@ -624,7 +621,7 @@
                         width: img.width,
                         height: img.height,
                     },
-                    format: 'rgba16float',
+                    format: 'rgba8unorm',
                     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
                 });
 
