@@ -27,6 +27,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var sumWeight = 0.0;
 
     // Sample along the provided offsets with texture sampling
+    if (centerCoC < 0.00001) {
+        textureStore(outputTexture, idx, textureLoad(inputTexture, idx, 0));
+        return;
+    }
+
     for (var i = 0u; i < params.num_samples; i++) {
         let offset = offsets[i];
         

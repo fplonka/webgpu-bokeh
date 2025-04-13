@@ -97,9 +97,9 @@
                     <div class="flex items-center gap-4">
                         <label for="bokehShape" class="w-24">Bokeh Shape</label>
                         <select id="bokehShape" class="rounded border border-gray-300 px-2 py-1" disabled>
-                            <option value="circle">Circle</option>
+                            <option value="hexagon" selected>Hexagon</option>
+                            <option value="octagon">Octagon</option>
                             <option value="square">Square</option>
-                            <option value="hexagon">Hexagon</option>
                         </select>
                     </div>
                     <div class="flex items-center gap-4">
@@ -141,7 +141,8 @@
                 pipelines: {
                     coc: null,
                     blurDirectional: null,
-                    renderToCanvas: null
+                    renderToCanvas: null,
+                    combine: null
                 },
                 presentationFormat: null,
             },
@@ -269,10 +270,11 @@
             });
 
             // Load and compile all shaders
-            const [cocCode, blurDirectionalCode, fullscreenQuadCode] = await Promise.all([
+            const [cocCode, blurDirectionalCode, fullscreenQuadCode, combineCode] = await Promise.all([
                 fetch('coc.wgsl').then(r => r.text()),
                 fetch('blur_directional.wgsl').then(r => r.text()),
-                fetch('fullscreen_quad.wgsl').then(r => r.text())
+                fetch('fullscreen_quad.wgsl').then(r => r.text()),
+                fetch('combine.wgsl').then(r => r.text())
             ]);
 
             const cocShaderModule = state.webgpu.device.createShaderModule({
@@ -286,8 +288,6 @@
             const fullscreenQuadModule = state.webgpu.device.createShaderModule({
                 code: fullscreenQuadCode
             });
-
-            // Offset buffers are now created dynamically in applyBokeh
 
             // Create pipelines for all passes and store in state
             state.webgpu.pipelines.coc = state.webgpu.device.createComputePipeline({
@@ -327,13 +327,31 @@
                 }
             });
 
-            console.log("WebGPU initialized with direct canvas rendering");
+            // Create the combine shader module
+            const combineShaderModule = state.webgpu.device.createShaderModule({
+                code: combineCode
+            });
+
+            // Create the combine pipeline for blending multiple directional blurs
+            state.webgpu.pipelines.combine = state.webgpu.device.createComputePipeline({
+                layout: 'auto',
+                compute: {
+                    module: combineShaderModule,
+                    entryPoint: 'main'
+                }
+            });
+
+            console.log("WebGPU initialized with directional blur and combine pipelines");
         }
 
         async function applyBokeh() {
             await new Promise(resolve => setTimeout(resolve, 5)); // cursed: to let the 'processing...' status update get drawn
             const canvas = originalCanvas;
             const focusDepth = state.focus.depth;
+
+            // Get the selected bokeh shape
+            const selectedShape = bokehShape.value; // 'circle', 'square', or 'hexagon'
+            console.log(`Applying bokeh effect with shape: ${selectedShape}`);
 
             // Create textures for processing
 
@@ -362,26 +380,6 @@
                     height: state.dimensions.height,
                 },
                 format: 'r32float',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
-            });
-
-            // the input texture is state.pixelTexture.
-
-            const intermediateLinearTexture = state.webgpu.device.createTexture({
-                size: {
-                    width: state.dimensions.width,
-                    height: state.dimensions.height,
-                },
-                format: 'rgba8unorm',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
-            });
-
-            const outputLinearTexture = state.webgpu.device.createTexture({
-                size: {
-                    width: state.dimensions.width,
-                    height: state.dimensions.height,
-                },
-                format: 'rgba8unorm',
                 usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
             });
 
@@ -418,19 +416,443 @@
                 return offsetsArray;
             }
 
-            const horizontalOffsets = generateOffsets(0, numSamples);
-            const verticalOffsets = generateOffsets(90, numSamples);
+            // Helper function to generate blur passes for square bokeh (horizontal + vertical)
+            function processSquareBokeh(commandEncoder, cocTexture, shaderParamsBuffer, textureSampler) {
+                const horizontalOffsets = generateOffsets(0, numSamples);
+                const verticalOffsets = generateOffsets(90, numSamples);
 
-            // Create the GPU buffers for the offsets
-            const offsetBufferSize = numSamples * 2 * 4; // 2 floats per sample, 4 bytes per float
-            const horizontalOffsetsBuffer = state.webgpu.device.createBuffer({
-                size: offsetBufferSize,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            });
-            const verticalOffsetsBuffer = state.webgpu.device.createBuffer({
-                size: offsetBufferSize,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            });
+                // Create buffers for offsets
+                const offsetBufferSize = numSamples * 2 * 4; // 2 floats per sample, 4 bytes per float
+                const horizontalOffsetsBuffer = state.webgpu.device.createBuffer({
+                    size: offsetBufferSize,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+                const verticalOffsetsBuffer = state.webgpu.device.createBuffer({
+                    size: offsetBufferSize,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+
+                // Write offsets to GPU
+                state.webgpu.device.queue.writeBuffer(horizontalOffsetsBuffer, 0, horizontalOffsets);
+                state.webgpu.device.queue.writeBuffer(verticalOffsetsBuffer, 0, verticalOffsets);
+
+                // Create intermediate texture
+                const intermediateTexture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                });
+
+                // Create output texture (the final blurred result)
+                const outputTexture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                });
+
+                // Bind group for horizontal blur
+                const blurHBindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: state.pixelTexture.createView() },
+                        { binding: 1, resource: intermediateTexture.createView() },
+                        { binding: 2, resource: { buffer: shaderParamsBuffer } },
+                        { binding: 3, resource: cocTexture.createView() },
+                        { binding: 4, resource: { buffer: horizontalOffsetsBuffer } },
+                        { binding: 5, resource: textureSampler },
+                    ],
+                });
+
+                // Bind group for vertical blur
+                const blurVBindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: intermediateTexture.createView() },
+                        { binding: 1, resource: outputTexture.createView() },
+                        { binding: 2, resource: { buffer: shaderParamsBuffer } },
+                        { binding: 3, resource: cocTexture.createView() },
+                        { binding: 4, resource: { buffer: verticalOffsetsBuffer } },
+                        { binding: 5, resource: textureSampler },
+                    ],
+                });
+
+                // Horizontal blur pass
+                const blurHPass = commandEncoder.beginComputePass();
+                blurHPass.setPipeline(state.webgpu.pipelines.blurDirectional);
+                blurHPass.setBindGroup(0, blurHBindGroup);
+                blurHPass.dispatchWorkgroups(
+                    Math.ceil(state.dimensions.width / 8),
+                    Math.ceil(state.dimensions.height / 8)
+                );
+                blurHPass.end();
+
+                // Vertical blur pass
+                const blurVPass = commandEncoder.beginComputePass();
+                blurVPass.setPipeline(state.webgpu.pipelines.blurDirectional);
+                blurVPass.setBindGroup(0, blurVBindGroup);
+                blurVPass.dispatchWorkgroups(
+                    Math.ceil(state.dimensions.width / 8),
+                    Math.ceil(state.dimensions.height / 8)
+                );
+                blurVPass.end();
+
+                return outputTexture;
+            }
+
+            // Helper function to generate blur passes for hexagon bokeh (0°, 60°, 120°)
+            function processHexagonBokeh(commandEncoder, cocTexture, shaderParamsBuffer, textureSampler) {
+                // Generate offsets for 0°, 60°, and 120° directions
+                const offsets0deg = generateOffsets(0, numSamples);
+                const offsets60deg = generateOffsets(60, numSamples);
+                const offsets120deg = generateOffsets(120, numSamples);
+
+                // Create offset buffers
+                const offsetBufferSize = numSamples * 2 * 4;
+                const offsets0Buffer = state.webgpu.device.createBuffer({
+                    size: offsetBufferSize,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+                const offsets60Buffer = state.webgpu.device.createBuffer({
+                    size: offsetBufferSize,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+                const offsets120Buffer = state.webgpu.device.createBuffer({
+                    size: offsetBufferSize,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+
+                // Write offsets to GPU
+                state.webgpu.device.queue.writeBuffer(offsets0Buffer, 0, offsets0deg);
+                state.webgpu.device.queue.writeBuffer(offsets60Buffer, 0, offsets60deg);
+                state.webgpu.device.queue.writeBuffer(offsets120Buffer, 0, offsets120deg);
+
+                // Create textures for intermediate results
+                const horizontalBlurTexture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                });
+
+                const blur60Texture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                });
+
+                const blur120Texture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                });
+
+                const outputTexture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                });
+
+                // Bind group for horizontal blur (0°)
+                const blur0BindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: state.pixelTexture.createView() },
+                        { binding: 1, resource: horizontalBlurTexture.createView() },
+                        { binding: 2, resource: { buffer: shaderParamsBuffer } },
+                        { binding: 3, resource: cocTexture.createView() },
+                        { binding: 4, resource: { buffer: offsets0Buffer } },
+                        { binding: 5, resource: textureSampler },
+                    ],
+                });
+
+                // Bind group for 60° blur
+                const blur60BindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: horizontalBlurTexture.createView() },
+                        { binding: 1, resource: blur60Texture.createView() },
+                        { binding: 2, resource: { buffer: shaderParamsBuffer } },
+                        { binding: 3, resource: cocTexture.createView() },
+                        { binding: 4, resource: { buffer: offsets60Buffer } },
+                        { binding: 5, resource: textureSampler },
+                    ],
+                });
+
+                // Bind group for 120° blur
+                const blur120BindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: horizontalBlurTexture.createView() },
+                        { binding: 1, resource: blur120Texture.createView() },
+                        { binding: 2, resource: { buffer: shaderParamsBuffer } },
+                        { binding: 3, resource: cocTexture.createView() },
+                        { binding: 4, resource: { buffer: offsets120Buffer } },
+                        { binding: 5, resource: textureSampler },
+                    ],
+                });
+
+                // Bind group for combining blur60 and blur120
+                const combineBindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.combine.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: blur60Texture.createView() },
+                        { binding: 1, resource: blur120Texture.createView() },
+                        { binding: 2, resource: outputTexture.createView() },
+                    ],
+                });
+
+                // Horizontal blur pass (0°)
+                const blur0Pass = commandEncoder.beginComputePass();
+                blur0Pass.setPipeline(state.webgpu.pipelines.blurDirectional);
+                blur0Pass.setBindGroup(0, blur0BindGroup);
+                blur0Pass.dispatchWorkgroups(
+                    Math.ceil(state.dimensions.width / 8),
+                    Math.ceil(state.dimensions.height / 8)
+                );
+                blur0Pass.end();
+
+                // 60° blur pass
+                const blur60Pass = commandEncoder.beginComputePass();
+                blur60Pass.setPipeline(state.webgpu.pipelines.blurDirectional);
+                blur60Pass.setBindGroup(0, blur60BindGroup);
+                blur60Pass.dispatchWorkgroups(
+                    Math.ceil(state.dimensions.width / 8),
+                    Math.ceil(state.dimensions.height / 8)
+                );
+                blur60Pass.end();
+
+                // 120° blur pass
+                const blur120Pass = commandEncoder.beginComputePass();
+                blur120Pass.setPipeline(state.webgpu.pipelines.blurDirectional);
+                blur120Pass.setBindGroup(0, blur120BindGroup);
+                blur120Pass.dispatchWorkgroups(
+                    Math.ceil(state.dimensions.width / 8),
+                    Math.ceil(state.dimensions.height / 8)
+                );
+                blur120Pass.end();
+
+                // Combine pass (less bright of 60° and 120° passes)
+                const combinePass = commandEncoder.beginComputePass();
+                combinePass.setPipeline(state.webgpu.pipelines.combine);
+                combinePass.setBindGroup(0, combineBindGroup);
+                combinePass.dispatchWorkgroups(
+                    Math.ceil(state.dimensions.width / 8),
+                    Math.ceil(state.dimensions.height / 8)
+                );
+                combinePass.end();
+
+                return outputTexture;
+            }
+            
+            // Process octagon bokeh with 0°+90° and 45°+135° directional blurs
+            function processOctagonBokeh(commandEncoder, cocTexture, shaderParamsBuffer, textureSampler) {
+                // Generate offsets for 0°, 45°, 90°, and 135° directions
+                const offsets0deg = generateOffsets(0, numSamples);
+                const offsets45deg = generateOffsets(45, numSamples);
+                const offsets90deg = generateOffsets(90, numSamples);
+                const offsets135deg = generateOffsets(135, numSamples);
+
+                // Create offset buffers
+                const offsetBufferSize = numSamples * 2 * 4;
+                const offsets0Buffer = state.webgpu.device.createBuffer({
+                    size: offsetBufferSize,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+                const offsets45Buffer = state.webgpu.device.createBuffer({
+                    size: offsetBufferSize,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+                const offsets90Buffer = state.webgpu.device.createBuffer({
+                    size: offsetBufferSize,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+                const offsets135Buffer = state.webgpu.device.createBuffer({
+                    size: offsetBufferSize,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+
+                // Write offsets to GPU
+                state.webgpu.device.queue.writeBuffer(offsets0Buffer, 0, offsets0deg);
+                state.webgpu.device.queue.writeBuffer(offsets45Buffer, 0, offsets45deg);
+                state.webgpu.device.queue.writeBuffer(offsets90Buffer, 0, offsets90deg);
+                state.webgpu.device.queue.writeBuffer(offsets135Buffer, 0, offsets135deg);
+
+                // Create textures for intermediate results
+                // First set of blurs: 0° -> 90°
+                const horizontal0Texture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                });
+                const vertical90Texture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                });
+
+                // Second set of blurs: 45° -> 135°
+                const diagonal45Texture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                });
+                const diagonal135Texture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                });
+
+                // Output texture for final result
+                const outputTexture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'rgba8unorm',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                });
+
+                // Bind groups for first set of blurs (0° -> 90°)
+                const blur0BindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: state.pixelTexture.createView() },
+                        { binding: 1, resource: horizontal0Texture.createView() },
+                        { binding: 2, resource: { buffer: shaderParamsBuffer } },
+                        { binding: 3, resource: cocTexture.createView() },
+                        { binding: 4, resource: { buffer: offsets0Buffer } },
+                        { binding: 5, resource: textureSampler },
+                    ],
+                });
+                const blur90BindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: horizontal0Texture.createView() },
+                        { binding: 1, resource: vertical90Texture.createView() },
+                        { binding: 2, resource: { buffer: shaderParamsBuffer } },
+                        { binding: 3, resource: cocTexture.createView() },
+                        { binding: 4, resource: { buffer: offsets90Buffer } },
+                        { binding: 5, resource: textureSampler },
+                    ],
+                });
+
+                // Bind groups for second set of blurs (45° -> 135°)
+                const blur45BindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: state.pixelTexture.createView() },
+                        { binding: 1, resource: diagonal45Texture.createView() },
+                        { binding: 2, resource: { buffer: shaderParamsBuffer } },
+                        { binding: 3, resource: cocTexture.createView() },
+                        { binding: 4, resource: { buffer: offsets45Buffer } },
+                        { binding: 5, resource: textureSampler },
+                    ],
+                });
+                const blur135BindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: diagonal45Texture.createView() },
+                        { binding: 1, resource: diagonal135Texture.createView() },
+                        { binding: 2, resource: { buffer: shaderParamsBuffer } },
+                        { binding: 3, resource: cocTexture.createView() },
+                        { binding: 4, resource: { buffer: offsets135Buffer } },
+                        { binding: 5, resource: textureSampler },
+                    ],
+                });
+
+                // Bind group for combining the two sets of blurs
+                const combineBindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.combine.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: vertical90Texture.createView() },
+                        { binding: 1, resource: diagonal135Texture.createView() },
+                        { binding: 2, resource: outputTexture.createView() },
+                    ],
+                });
+
+                // First set of passes (0° -> 90°)
+                // Horizontal blur pass (0°)
+                const blur0Pass = commandEncoder.beginComputePass();
+                blur0Pass.setPipeline(state.webgpu.pipelines.blurDirectional);
+                blur0Pass.setBindGroup(0, blur0BindGroup);
+                blur0Pass.dispatchWorkgroups(
+                    Math.ceil(state.dimensions.width / 8),
+                    Math.ceil(state.dimensions.height / 8)
+                );
+                blur0Pass.end();
+
+                // Vertical blur pass (90°)
+                const blur90Pass = commandEncoder.beginComputePass();
+                blur90Pass.setPipeline(state.webgpu.pipelines.blurDirectional);
+                blur90Pass.setBindGroup(0, blur90BindGroup);
+                blur90Pass.dispatchWorkgroups(
+                    Math.ceil(state.dimensions.width / 8),
+                    Math.ceil(state.dimensions.height / 8)
+                );
+                blur90Pass.end();
+
+                // Second set of passes (45° -> 135°)
+                // 45° diagonal blur pass
+                const blur45Pass = commandEncoder.beginComputePass();
+                blur45Pass.setPipeline(state.webgpu.pipelines.blurDirectional);
+                blur45Pass.setBindGroup(0, blur45BindGroup);
+                blur45Pass.dispatchWorkgroups(
+                    Math.ceil(state.dimensions.width / 8),
+                    Math.ceil(state.dimensions.height / 8)
+                );
+                blur45Pass.end();
+
+                // 135° diagonal blur pass
+                const blur135Pass = commandEncoder.beginComputePass();
+                blur135Pass.setPipeline(state.webgpu.pipelines.blurDirectional);
+                blur135Pass.setBindGroup(0, blur135BindGroup);
+                blur135Pass.dispatchWorkgroups(
+                    Math.ceil(state.dimensions.width / 8),
+                    Math.ceil(state.dimensions.height / 8)
+                );
+                blur135Pass.end();
+
+                // Combine the two blur sets by taking the less bright pixel
+                const combinePass = commandEncoder.beginComputePass();
+                combinePass.setPipeline(state.webgpu.pipelines.combine);
+                combinePass.setBindGroup(0, combineBindGroup);
+                combinePass.dispatchWorkgroups(
+                    Math.ceil(state.dimensions.width / 8),
+                    Math.ceil(state.dimensions.height / 8)
+                );
+                combinePass.end();
+
+                return outputTexture;
+            }
 
             // Create a sampler for texture sampling
             const textureSampler = state.webgpu.device.createSampler({
@@ -439,10 +861,6 @@
                 addressModeU: 'clamp-to-edge',
                 addressModeV: 'clamp-to-edge',
             });
-
-            // Write the offsets to the GPU
-            state.webgpu.device.queue.writeBuffer(horizontalOffsetsBuffer, 0, horizontalOffsets);
-            state.webgpu.device.queue.writeBuffer(verticalOffsetsBuffer, 0, verticalOffsets);
 
             // Create conversion params buffer (empty as we now use texture dimensions)
             const convertParamsBuffer = state.webgpu.device.createBuffer({
@@ -466,50 +884,13 @@
             ]);
             state.webgpu.device.queue.writeBuffer(cocParamsBuffer, 0, cocParamsArray);
 
-            // Create bind groups for all passes
+            // Create bind groups for CoC calculation
             const cocBindGroup = state.webgpu.device.createBindGroup({
                 layout: state.webgpu.pipelines.coc.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: depthTexture.createView() },
                     { binding: 1, resource: cocTexture.createView() },
                     { binding: 2, resource: { buffer: cocParamsBuffer } },
-                ],
-            });
-
-            // No need for the toLinear bind group anymore since we're using rgba8unorm-srgb format
-
-            // Bind group for horizontal (0°) blur pass in linear space
-            const blurHBindGroup = state.webgpu.device.createBindGroup({
-                layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: state.pixelTexture.createView() },
-                    { binding: 1, resource: intermediateLinearTexture.createView() },
-                    { binding: 2, resource: { buffer: shaderParamsBuffer } },
-                    { binding: 3, resource: cocTexture.createView() },
-                    { binding: 4, resource: { buffer: horizontalOffsetsBuffer } },
-                    { binding: 5, resource: textureSampler },
-                ],
-            });
-
-            // Bind group for vertical (90°) blur pass in linear space
-            const blurVBindGroup = state.webgpu.device.createBindGroup({
-                layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: intermediateLinearTexture.createView() },
-                    { binding: 1, resource: outputLinearTexture.createView() },
-                    { binding: 2, resource: { buffer: shaderParamsBuffer } },
-                    { binding: 3, resource: cocTexture.createView() },
-                    { binding: 4, resource: { buffer: verticalOffsetsBuffer } },
-                    { binding: 5, resource: textureSampler },
-                ],
-            });
-
-            // Bind group for rendering to canvas
-            const renderToCanvasBindGroup = state.webgpu.device.createBindGroup({
-                layout: state.webgpu.pipelines.renderToCanvas.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: outputLinearTexture.createView() },
-                    { binding: 1, resource: textureSampler }, // Reusing the same sampler we created earlier
                 ],
             });
 
@@ -526,25 +907,32 @@
             );
             cocPass.end();
 
-            // Horizontal (0°) directional blur pass (in linear space)
-            const blurHPass = commandEncoder.beginComputePass();
-            blurHPass.setPipeline(state.webgpu.pipelines.blurDirectional);
-            blurHPass.setBindGroup(0, blurHBindGroup);
-            blurHPass.dispatchWorkgroups(
-                Math.ceil(canvas.width / 8),
-                Math.ceil(canvas.height / 8)
-            );
-            blurHPass.end();
+            // Process bokeh blur based on selected shape
+            let finalOutputTexture;
 
-            // Vertical (90°) directional blur pass (in linear space)
-            const blurVPass = commandEncoder.beginComputePass();
-            blurVPass.setPipeline(state.webgpu.pipelines.blurDirectional);
-            blurVPass.setBindGroup(0, blurVBindGroup);
-            blurVPass.dispatchWorkgroups(
-                Math.ceil(canvas.width / 8),
-                Math.ceil(canvas.height / 8)
-            );
-            blurVPass.end();
+            if (selectedShape === 'square') {
+                // Apply square bokeh (horizontal + vertical blur)
+                finalOutputTexture = processSquareBokeh(commandEncoder, cocTexture, shaderParamsBuffer, textureSampler);
+            } else if (selectedShape === 'hexagon') {
+                // Apply hexagon bokeh (0°, 60°, 120° blur)
+                finalOutputTexture = processHexagonBokeh(commandEncoder, cocTexture, shaderParamsBuffer, textureSampler);
+            } else if (selectedShape === 'octagon') {
+                // Apply octagon bokeh (0°+90° and 45°+135° blur)
+                finalOutputTexture = processOctagonBokeh(commandEncoder, cocTexture, shaderParamsBuffer, textureSampler);
+            } else {
+                // Default to hexagon bokeh as a fallback
+                console.log(`Using hexagon bokeh for shape: ${selectedShape}`);
+                finalOutputTexture = processHexagonBokeh(commandEncoder, cocTexture, shaderParamsBuffer, textureSampler);
+            }
+
+            // Bind group for rendering final result to canvas
+            const renderToCanvasBindGroup = state.webgpu.device.createBindGroup({
+                layout: state.webgpu.pipelines.renderToCanvas.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: finalOutputTexture.createView() },
+                    { binding: 1, resource: textureSampler },
+                ],
+            });
 
             // Final pass: Render directly to canvas
             const renderPassEncoder = commandEncoder.beginRenderPass({

@@ -1,9 +1,7 @@
-- polygons
 - black sliders?
 - better indicator than red dot
 - fix on firefox
 - info for when webgpu is not supported
-- make things grayed out / reset on new image upload
 - do we handle correctly uploading image when loading depth model?
 - drop go code
     - inline wgsl
@@ -18,5 +16,7 @@
 
 - sample coc texture, or don't if f32 filtering not supported
 - only recompute coc when focus changes
+
+- texture from canvas? and skip frag shader?
 
 square: 300ms on big mariam image
