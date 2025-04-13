@@ -55,6 +55,7 @@
 </head>
 
 <body class="bg-zinc-100 min-h-screen flex flex-col items-stretch m-0 p-0">
+
     <div class="bg-white max-w-2xl w-full mx-auto sm:m-auto p-6">
         <h1 class="mt-0">Bokeh Magic</h1>
 
@@ -120,6 +121,13 @@
     </div>
 
     <script type="module">
+        // Check WebGPU support immediately
+        if (!navigator.gpu || true) {
+            alert('WebGPU not supported  :( try using Chrome/Edge');
+            const msg = document.createElement('p');
+            msg.innerHTML = 'NOTE: your browser does not support WebGPU. Check <a href="https://caniuse.com/webgpu">browser support status</a>.';
+            document.querySelector('.bg-white p').insertAdjacentElement('afterend', msg);
+        }
         // Updates when the user uploads an image or changes setting (clicks to set focus point, changes blur strength etc)
         const state = {
             // Image and depth data
