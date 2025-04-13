@@ -38,30 +38,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let sampleX = u32(floatSampleX);
         let sampleY = u32(floatSampleY);
         
-        // Check bounds
-        if (sampleX >= 0 && sampleX < params.width && 
-            sampleY >= 0 && sampleY < params.height) {
-            
-            let sampleIdx = sampleY * params.width + sampleX;
-            
-            let sampleCoC = cocBuffer[sampleIdx];
-            let dist = length(vec2<f32>(offset.x * centerCoC, offset.y * centerCoC));
-            if dist > sampleCoC {
-                continue;
-            }
-
-            let sampleColor = inputImage[sampleIdx];
-            
-            // Use a simple box filter weight for now
-            // Could be extended to use different weight functions
-            let weight = 1.0;
-            
-            sumColor += sampleColor * weight;
-            sumWeight += weight;
+        let sampleIdx = sampleY * params.width + sampleX;
+        
+        let sampleCoC = cocBuffer[sampleIdx];
+        let dist = length(vec2<f32>(offset.x * centerCoC, offset.y * centerCoC));
+        if dist > sampleCoC {
+            continue;
         }
+
+        sumColor += inputImage[sampleIdx];
+        sumWeight += 1;
     }
 
-    // Normalize the result
     if (sumWeight > 0.0) {
         outputImage[centerIdx] = sumColor / sumWeight;
     } else {

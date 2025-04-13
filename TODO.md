@@ -10,3 +10,8 @@
 - cloudflare deployment
 - updating drag setting through kb doesn't redraw (e.g. setting blur strength to 7 by typing)
 - brief debounce
+- instead of my thing do the thing from the paper, comparing sample vs center coc and depth etc
+- saving image!!
+- performance optimzation 80/20
+
+square: 300ms on big mariam image

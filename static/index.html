@@ -342,6 +342,7 @@
         }
 
         async function applyBokeh() {
+            await new Promise(resolve => setTimeout(resolve, 5)); // cursed: to let the 'processing...' status update get drawn
             const canvas = originalCanvas;
             const focusDepth = state.focus.depth;
 
@@ -556,7 +557,11 @@
             renderPassEncoder.end();
 
             // Submit all commands to GPU
+            console.time('gpu work')
             state.webgpu.device.queue.submit([commandEncoder.finish()]);
+
+            await state.webgpu.device.queue.onSubmittedWorkDone()
+            console.timeEnd('gpu work')
 
             console.log("Bokeh effect applied with focus depth:", focusDepth, "max_coc:", maxCoc, "depth_of_field:", depthOfField.value);
         }
@@ -636,6 +641,8 @@
                 renderPass.draw(6);
                 renderPass.end();
                 state.webgpu.device.queue.submit([renderEncoder.finish()]);
+
+                state.webgpu.device.queue.onSubmittedWorkDone();
             }
         }
 
@@ -674,6 +681,8 @@
         originalCanvas.addEventListener('click', async (event) => {
             if (!state.depthMap.values) return;
 
+            updateStatus('processing...');
+
             const rect = originalCanvas.getBoundingClientRect();
             const scaleX = originalCanvas.width / rect.width;
             const scaleY = originalCanvas.height / rect.height;
@@ -696,7 +705,6 @@
             state.focus.depth = state.depthMap.values[index];
 
             console.log(`Depth at (${x}, ${y}): ${state.focus.depth.toFixed(3)}`);
-            updateStatus('processing...');
             await applyBokeh();
             updateStatus('processing...', false);
             setControlsEnabled(true);
@@ -723,7 +731,7 @@
 
                 // Enable click handling if model is ready
                 if (!state.model.loading) {
-                    // originalCanvas.style.cursor = 'crosshair';
+                    originalCanvas.style.cursor = 'crosshair';
                     updateStatus('Click anywhere on the image to set focus point.');
                 }
 
