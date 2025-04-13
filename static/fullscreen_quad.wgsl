@@ -31,39 +31,11 @@ fn vertex_main(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
   return output;
 }
 
-// Fragment shader for converting linear RGB to sRGB and displaying
+// Fragment shader for displaying the final image
 @group(0) @binding(0) var linearTexture: texture_2d<f32>;
-
-// Convert linear RGB to sRGB
-fn linearToSrgb(x: f32) -> f32 {
-  if x <= 0.0031308 {
-    return 12.92 * x;
-  } else {
-    return 1.055 * pow(x, 1.0 / 2.4) - 0.055;
-  }
-}
+@group(0) @binding(1) var textureSampler: sampler;
 
 @fragment
 fn fragment_main(@location(0) fragUV : vec2f) -> @location(0) vec4f {
-  // Get texture dimensions directly from the texture
-  let dims = textureDimensions(linearTexture);
-  
-  let x = i32(fragUV.x * f32(dims.x));
-  let y = i32(fragUV.y * f32(dims.y));
-  
-  // Bounds check
-  if (x >= i32(dims.x) || y >= i32(dims.y)) {
-    return vec4f(0.0, 0.0, 0.0, 1.0);
-  }
-  
-  // Read linear color from texture
-  let linearColor = textureLoad(linearTexture, vec2<i32>(x, y), 0);
-  
-  // Convert linear to sRGB
-  return vec4f(
-    linearColor.r,
-    linearColor.g,
-    linearColor.b,
-    linearColor.a
-  );
+  return textureSample(linearTexture, textureSampler, fragUV);
 }
