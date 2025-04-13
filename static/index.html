@@ -262,10 +262,12 @@
             const canvas = originalCanvas;
             state.webgpu.context = canvas.getContext('webgpu');
             const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+            console.log("presentation format:", presentationFormat)
             state.webgpu.context.configure({
                 device: state.webgpu.device,
                 format: presentationFormat,
-                alphaMode: 'premultiplied'
+                viewFormats: ['bgra8unorm-srgb'],
+                // alphaMode: 'premultiplied'
             });
 
             // Load and compile all shaders
@@ -331,7 +333,7 @@
                     entryPoint: 'fragment_main',
                     targets: [
                         {
-                            format: presentationFormat
+                            format: presentationFormat + '-srgb'
                         }
                     ]
                 },
@@ -582,7 +584,9 @@
             // Final pass: Render directly to canvas
             const renderPassEncoder = commandEncoder.beginRenderPass({
                 colorAttachments: [{
-                    view: state.webgpu.context.getCurrentTexture().createView(),
+                    view: state.webgpu.context.getCurrentTexture().createView({
+                        format: 'bgra8unorm-srgb'
+                    }),
                     clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
                     loadOp: 'clear',
                     storeOp: 'store',

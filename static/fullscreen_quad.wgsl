@@ -61,9 +61,9 @@ fn fragment_main(@location(0) fragUV : vec2f) -> @location(0) vec4f {
   
   // Convert linear to sRGB
   return vec4f(
-    linearToSrgb(linearColor.r),
-    linearToSrgb(linearColor.g),
-    linearToSrgb(linearColor.b),
+    linearColor.r,
+    linearColor.g,
+    linearColor.b,
     linearColor.a
   );
 }
