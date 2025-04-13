@@ -17,6 +17,7 @@
             transform: translate(-50%, -50%);
             pointer-events: none;
             opacity: 0.7;
+            z-index: 5;
         }
 
         .loading-overlay {
@@ -53,8 +54,8 @@
     </style>
 </head>
 
-<body class="bg-zinc-100 min-h-screen p-4">
-    <div class="bg-white max-w-2xl mx-auto p-6">
+<body class="bg-zinc-100 min-h-screen flex flex-col items-stretch m-0 p-0">
+    <div class="bg-white max-w-2xl w-full mx-auto sm:m-auto p-6">
         <h1 class="mt-0">Bokeh Magic</h1>
 
         <p>
@@ -66,19 +67,24 @@
         <div class="mt-6">
             <div class="relative">
                 <div class="relative">
-                    <canvas id="originalCanvas" class="w-full"></canvas>
-                    <div id="clickIndicator" class="click-indicator" style="display: none;"></div>
-                    <div id="loadingOverlay" class="loading-overlay">
-                        <div class="spinner"></div>
+                    <div class="relative w-full overflow-hidden flex justify-center items-center">
+                        <div class="relative"> <!-- Canvas wrapper for positioning -->
+                            <canvas id="originalCanvas"
+                                class="max-h-[65vh] max-w-full w-auto h-auto object-contain"></canvas>
+                            <div id="clickIndicator" class="click-indicator" style="display: none;"></div>
+                            <div id="loadingOverlay" class="loading-overlay">
+                                <div class="spinner"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
 
-                <div id="statusText" class="mt-2 h-6 block text-zinc-500">
+                <div id="statusText" class="mt-4 h-6 block text-zinc-500">
                     Loading depth model, please wait...
                 </div>
 
-                <div class="mt-6 space-y-4">
+                <div class="mt-3 space-y-4">
                     <div class="flex items-center gap-4">
                         <label for="blurStrength" class="w-24">Blur Strength</label>
                         <!-- TODO: max 6 -->
@@ -192,7 +198,6 @@
         }).then(model => {
             state.model.estimator = model;
             state.model.loading = false;
-            updateStatus('Click anywhere on the image to set focus point.');
         }).catch(error => {
             console.error('Error loading model:', error);
             updateStatus('Error loading model. Please refresh the page.');
@@ -1039,14 +1044,14 @@
             if (!state.focus.x || !state.focus.y) return;
 
             try {
-                updateStatus('processing...');
+                updateStatus('Processing...');
 
                 // Get depth at current focus point
                 const index = state.focus.y * state.dimensions.width + state.focus.x;
                 state.focus.depth = state.depthMap.values[index];
 
                 await applyBokeh();
-                updateStatus('processing...', false);
+                updateStatus('Processing...', false);
             } catch (error) {
                 console.error('Error applying bokeh:', error);
                 updateStatus('error applying effect', true);
@@ -1064,7 +1069,7 @@
         originalCanvas.addEventListener('click', async (event) => {
             if (!state.depthMap.values) return;
 
-            updateStatus('processing...');
+            updateStatus('Processing...');
 
             const rect = originalCanvas.getBoundingClientRect();
             const scaleX = originalCanvas.width / rect.width;
@@ -1074,10 +1079,13 @@
             const x = Math.floor((event.clientX - rect.left) * scaleX);
             const y = Math.floor((event.clientY - rect.top) * scaleY);
 
-            // Update click indicator position
+            // Get canvas and its positioning information
+            const canvasRect = originalCanvas.getBoundingClientRect();
+
+            // Calculate position relative to the canvas itself, not the container
             clickIndicator.style.display = 'block';
-            clickIndicator.style.left = (event.clientX - rect.left) + 'px';
-            clickIndicator.style.top = (event.clientY - rect.top) + 'px';
+            clickIndicator.style.left = (event.clientX - canvasRect.left) + 'px';
+            clickIndicator.style.top = (event.clientY - canvasRect.top) + 'px';
 
             // Update focus state
             state.focus.x = x;
@@ -1089,27 +1097,24 @@
 
             console.log(`Depth at (${x}, ${y}): ${state.focus.depth.toFixed(3)}`);
             await applyBokeh();
-            updateStatus('processing...', false);
+            updateStatus('Processing...', false);
             setControlsEnabled(true);
         });
 
         // Initialize WebGPU when the page loads
-        initWebGPU().catch(console.error);
+        initWebGPU().then(() => {
+            // Load a default image after WebGPU is initialized
+            loadDefaultImage();
+        }).catch(console.error);
 
-        imageUpload.addEventListener('change', async (event) => {
-            const file = event.target.files[0];
-            if (!file) return;
-
-            state.reset(); // Reset state and clean up resources
-            loadingOverlay.style.display = 'flex';
-            updateStatus('Loading image...');
-
+        // Shared function to process an image regardless of source
+        async function processImage(image, statusPrefix = '') {
             try {
-                const image = new Image();
-                image.src = URL.createObjectURL(file);
+                state.reset(); // Reset state and clean up resources
+                loadingOverlay.style.display = 'flex';
+                updateStatus(`${statusPrefix}Loading image...`);
 
-                // Wait for image to load
-                await new Promise(r => image.onload = r);
+                // Draw the image on the canvas
                 drawImageToCanvas(originalCanvas, image);
 
                 // Enable click handling if model is ready
@@ -1120,6 +1125,7 @@
 
                 // Wait for model if still loading
                 if (state.model.loading) {
+                    updateStatus('Waiting for depth model to load...');
                     while (state.model.loading) {
                         await new Promise(r => setTimeout(r, 100));
                     }
@@ -1136,6 +1142,7 @@
                     values: new Float32Array(result.depth.data).map(v => v / 255),
                     texture: null
                 };
+
                 state.depthMap.texture = state.webgpu.device.createTexture({
                     size: {
                         width: state.dimensions.width,
@@ -1144,6 +1151,7 @@
                     format: 'r32float',
                     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING,
                 });
+
                 state.webgpu.device.queue.writeTexture(
                     { texture: state.depthMap.texture },
                     state.depthMap.values,
@@ -1151,12 +1159,64 @@
                     { width: state.dimensions.width, height: state.dimensions.height }
                 );
 
+                // Ready to use
+                originalCanvas.style.cursor = 'crosshair';
                 updateStatus('Ready! Click anywhere to set focus point.');
+                loadingOverlay.style.display = 'none';
+                return true;
+            } catch (error) {
+                console.error(`Error processing image: ${error}`);
+                updateStatus(`Error processing image. ${error.message}`);
+                loadingOverlay.style.display = 'none';
+                return false;
+            }
+        }
+
+        // Function to load a default image from a URL when the page loads
+        async function loadDefaultImage() {
+            // const defaultImageUrl = 'https://media.istockphoto.com/id/1262031768/photo/beautiful-young-woman-at-times-square-new-york.jpg?s=612x612&w=0&k=20&c=TT_e1HHpZAKwbQfBkJNFwYq11LNjXYgN-bbUZLuTte8=';
+            // const defaultImageUrl = 'https://www.rollingstone.com/wp-content/uploads/2018/06/rs-22446-90294_lg.jpg?w=356&h=500&crop=1';
+            // DECENT const defaultImageUrl = 'https://i.guim.co.uk/img/media/ad4584fdb1bbbc81ee168ba8d348dccbe5162bd1/0_29_2047_1228/master/2047.jpg?width=1200&quality=85&auto=format&fit=max&s=6fcc0e876639314176bd365d2a36f943';
+            // TODO:
+            const defaultImageUrl = 'https://i.imgur.com/AUjSFiV.jpeg';
+
+            try {
+                // Create an image element to load the default image
+                const img = new Image();
+                img.crossOrigin = "anonymous"; // Enable CORS for the image
+
+                // Wait for the image to load
+                await new Promise((resolve, reject) => {
+                    img.onload = resolve;
+                    img.onerror = reject;
+                    img.src = defaultImageUrl;
+                });
+
+                // Process the image using the shared function
+                await processImage(img, 'Default: ');
+            } catch (error) {
+                console.error('Error loading default image:', error);
+                updateStatus('Error loading default image. Please upload your own image.');
+            }
+        }
+
+        imageUpload.addEventListener('change', async (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            try {
+                const image = new Image();
+                image.src = URL.createObjectURL(file);
+
+                // Wait for image to load
+                await new Promise(r => image.onload = r);
+
+                // Process the uploaded image using the shared function
+                await processImage(image, 'Uploaded: ');
             } catch (error) {
                 console.error('Error:', error);
                 alert('Failed to process image. Please try again.');
                 updateStatus('Error processing image');
-            } finally {
                 loadingOverlay.style.display = 'none';
             }
         });

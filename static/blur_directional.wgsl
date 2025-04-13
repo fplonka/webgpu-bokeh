@@ -27,7 +27,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var sumWeight = 0.0;
 
     // Sample along the provided offsets with texture sampling
-    if (centerCoC < 0.00001) {
+    if (centerCoC <= 0.5) { // basically sharp - don't do anything
         textureStore(outputTexture, idx, textureLoad(inputTexture, idx, 0));
         return;
     }
