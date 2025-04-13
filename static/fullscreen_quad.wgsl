@@ -32,13 +32,7 @@ fn vertex_main(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
 }
 
 // Fragment shader for converting linear RGB to sRGB and displaying
-struct Params {
-  width: u32,
-  height: u32,
-}
-
 @group(0) @binding(0) var linearTexture: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> params: Params;
 
 // Convert linear RGB to sRGB
 fn linearToSrgb(x: f32) -> f32 {
@@ -51,11 +45,14 @@ fn linearToSrgb(x: f32) -> f32 {
 
 @fragment
 fn fragment_main(@location(0) fragUV : vec2f) -> @location(0) vec4f {
-  let x = i32(fragUV.x * f32(params.width));
-  let y = i32(fragUV.y * f32(params.height));
+  // Get texture dimensions directly from the texture
+  let dims = textureDimensions(linearTexture);
+  
+  let x = i32(fragUV.x * f32(dims.x));
+  let y = i32(fragUV.y * f32(dims.y));
   
   // Bounds check
-  if (x >= i32(params.width) || y >= i32(params.height)) {
+  if (x >= i32(dims.x) || y >= i32(dims.y)) {
     return vec4f(0.0, 0.0, 0.0, 1.0);
   }
   

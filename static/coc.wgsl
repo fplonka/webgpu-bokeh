@@ -1,7 +1,8 @@
+// Depth texture using r32float format for high precision depth values
 @group(0) @binding(0) var depthTexture: texture_2d<f32>;
+// R32float is one of the few formats that supports read_write operations
 @group(0) @binding(1) var cocTexture: texture_storage_2d<r32float, write>;
-@group(0) @binding(2) var<uniform> dimensions: vec2<u32>;
-@group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(2) var<uniform> params: Params;
 
 struct Params {
     focus_depth: f32,
@@ -26,13 +27,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
 
-    if x >= dimensions.x || y >= dimensions.y {
+    // Get dimensions directly from the texture
+    let dims = textureDimensions(depthTexture);
+    
+    if x >= dims.x || y >= dims.y {
         return;
     }
     
     // Read depth from texture
     let depth = textureLoad(depthTexture, vec2<u32>(x, y), 0).r;
     
-    // Write coc radius to texture
+    // Write coc radius to texture - only need the r component since we're using r32float
     textureStore(cocTexture, vec2<u32>(x, y), vec4<f32>(calculate_coc_radius(depth, params.focus_depth), 0.0, 0.0, 0.0));
 } 

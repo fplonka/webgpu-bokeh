@@ -14,6 +14,6 @@
 - saving image!!
 - performance optimzation 80/20
     - textures!! -> less samples inshallah
-    - 
+- drop the fucking bounds checks, texture clamp sampling
 
 square: 300ms on big mariam image

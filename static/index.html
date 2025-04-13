@@ -378,33 +378,25 @@
                 usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
             });
 
-            // Create packed color texture (source image)
-            const packedTexture = state.webgpu.device.createTexture({
+            // Create color texture (source image) with automatic sRGB to linear conversion
+            const inputTexture = state.webgpu.device.createTexture({
                 size: {
                     width: state.dimensions.width,
                     height: state.dimensions.height,
                 },
-                format: 'r32uint',
+                format: 'rgba8unorm-srgb', // Use sRGB format for automatic gamma correction
                 usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
             });
 
-            // Write packed image data to the texture
+            // Write image data to the texture
             state.webgpu.device.queue.writeTexture(
-                { texture: packedTexture },
+                { texture: inputTexture },
                 state.pixelData, // This should be set earlier when image is loaded
                 { bytesPerRow: state.dimensions.width * 4 },
                 { width: state.dimensions.width, height: state.dimensions.height }
             );
 
-            // Create textures for linear space processing
-            const linearTexture = state.webgpu.device.createTexture({
-                size: {
-                    width: state.dimensions.width,
-                    height: state.dimensions.height,
-                },
-                format: 'rgba16float',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
-            });
+            // No need for a separate linearTexture anymore
 
             const intermediateLinearTexture = state.webgpu.device.createTexture({
                 size: {
@@ -429,7 +421,7 @@
             const numSamples = Math.ceil(1 + maxCoc / 4);
 
             const shaderParamsBuffer = state.webgpu.device.createBuffer({
-                size: 16, // 3 u32s (width, height, numSamples) + padding to 16 bytes
+                size: 16, // Only need numSamples now, but keeping buffer size consistent
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
 
@@ -439,7 +431,7 @@
             state.effect.depthOfField = parseFloat(depthOfField.value);
             state.effect.backgroundOnly = backgroundOnly.checked;
 
-            const shaderParamsArray = new Uint32Array([canvas.width, canvas.height, numSamples, 0]); // last 0 is padding
+            const shaderParamsArray = new Uint32Array([numSamples, 0, 0, 0]); // Only numSamples needed, rest is padding
             state.webgpu.device.queue.writeBuffer(shaderParamsBuffer, 0, shaderParamsArray);
 
             // Generate offsets for horizontal and vertical blur
@@ -483,12 +475,12 @@
             state.webgpu.device.queue.writeBuffer(horizontalOffsetsBuffer, 0, horizontalOffsets);
             state.webgpu.device.queue.writeBuffer(verticalOffsetsBuffer, 0, verticalOffsets);
 
-            // Create conversion params buffer (just width and height)
+            // Create conversion params buffer (empty as we now use texture dimensions)
             const convertParamsBuffer = state.webgpu.device.createBuffer({
-                size: 16, // 2 u32s (width, height) + padding to 16 bytes
+                size: 16, // Just padding for consistent buffer size
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
-            const convertParamsArray = new Uint32Array([canvas.width, canvas.height, 0, 0]); // extra 0s for padding
+            const convertParamsArray = new Uint32Array([0, 0, 0, 0]); // Not used anymore, but keeping for compatibility
             state.webgpu.device.queue.writeBuffer(convertParamsBuffer, 0, convertParamsArray);
 
             // Create CoC params uniform buffer
@@ -511,26 +503,17 @@
                 entries: [
                     { binding: 0, resource: depthTexture.createView() },
                     { binding: 1, resource: cocTexture.createView() },
-                    { binding: 2, resource: { buffer: shaderParamsBuffer } },
-                    { binding: 3, resource: { buffer: cocParamsBuffer } },
+                    { binding: 2, resource: { buffer: cocParamsBuffer } },
                 ],
             });
 
-            // Bind group for converting to linear space
-            const toLinearBindGroup = state.webgpu.device.createBindGroup({
-                layout: state.webgpu.pipelines.toLinear.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: packedTexture.createView() },
-                    { binding: 1, resource: linearTexture.createView() },
-                    { binding: 2, resource: { buffer: convertParamsBuffer } },
-                ],
-            });
+            // No need for the toLinear bind group anymore since we're using rgba8unorm-srgb format
 
             // Bind group for horizontal (0°) blur pass in linear space
             const blurHBindGroup = state.webgpu.device.createBindGroup({
                 layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: linearTexture.createView() },
+                    { binding: 0, resource: inputTexture.createView() }, // Use inputTexture directly
                     { binding: 1, resource: intermediateLinearTexture.createView() },
                     { binding: 2, resource: { buffer: shaderParamsBuffer } },
                     { binding: 3, resource: cocTexture.createView() },
@@ -557,7 +540,6 @@
                 layout: state.webgpu.pipelines.renderToCanvas.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: outputLinearTexture.createView() },
-                    { binding: 1, resource: { buffer: convertParamsBuffer } },
                 ],
             });
 
@@ -574,15 +556,8 @@
             );
             cocPass.end();
 
-            // Convert to linear space
-            const toLinearPass = commandEncoder.beginComputePass();
-            toLinearPass.setPipeline(state.webgpu.pipelines.toLinear);
-            toLinearPass.setBindGroup(0, toLinearBindGroup);
-            toLinearPass.dispatchWorkgroups(
-                Math.ceil(canvas.width / 8),
-                Math.ceil(canvas.height / 8)
-            );
-            toLinearPass.end();
+            // No need for conversion to linear space anymore
+            // The rgba8unorm-srgb format handles this automatically
 
             // Horizontal (0°) directional blur pass (in linear space)
             const blurHPass = commandEncoder.beginComputePass();
@@ -652,7 +627,7 @@
                         width: img.width,
                         height: img.height,
                     },
-                    format: 'r32uint',
+                    format: 'rgba8unorm-srgb', // Use sRGB format for automatic gamma correction
                     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
                 });
                 state.webgpu.device.queue.writeTexture(
@@ -663,6 +638,9 @@
                 );
                 // Store pixel data for later reuse
                 state.pixelData = pixelData;
+
+                // TODO: don't draw the image on load, need to fix textures etc bla bla
+                return;
 
                 // Create uniform buffer for dimensions
                 const paramsBuffer = state.webgpu.device.createBuffer({
