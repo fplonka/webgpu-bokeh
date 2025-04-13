@@ -387,7 +387,7 @@
 
             // Calculate maxCoc and number of samples
             let maxCoc = 0.001 * 0.5 * (canvas.width + canvas.height) * Math.pow(2, state.effect.blurStrength);
-            const numSamples = Math.ceil(1 + maxCoc / 4);
+            const numSamples = Math.ceil(1 + maxCoc / 2);
 
             const shaderParamsBuffer = state.webgpu.device.createBuffer({
                 size: 16, // Only need numSamples now, but keeping buffer size consistent
@@ -606,64 +606,45 @@
                     { width: img.width, height: img.height }
                 );
 
-                // TODO: don't draw the image on load, need to fix textures etc bla bla
-                return;
+                // Render the initial image to the canvas using WebGPU
 
-                // Create uniform buffer for dimensions
-                const paramsBuffer = state.webgpu.device.createBuffer({
-                    size: 16,
-                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-                });
-                state.webgpu.device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([img.width, img.height, 0, 0]));
-
-                // Create linear color space texture
-                const linearTexture = state.webgpu.device.createTexture({
-                    size: {
-                        width: img.width,
-                        height: img.height,
-                    },
-                    format: 'rgba8unorm',
-                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+                // Create a sampler for texture sampling
+                const textureSampler = state.webgpu.device.createSampler({
+                    magFilter: 'linear',
+                    minFilter: 'linear',
+                    addressModeU: 'clamp-to-edge',
+                    addressModeV: 'clamp-to-edge',
                 });
 
-                // Convert to linear space
-                // (this is a bit dumb, we use it to reuse the same rendering shader we use when applying the blur)
-                const computeEncoder = state.webgpu.device.createCommandEncoder();
-                const computePass = computeEncoder.beginComputePass();
-                computePass.setPipeline(state.webgpu.pipelines.toLinear);
-                computePass.setBindGroup(0, state.webgpu.device.createBindGroup({
-                    layout: state.webgpu.pipelines.toLinear.getBindGroupLayout(0),
+                // Create bind group for rendering to canvas
+                const renderToCanvasBindGroup = state.webgpu.device.createBindGroup({
+                    layout: state.webgpu.pipelines.renderToCanvas.getBindGroupLayout(0),
                     entries: [
                         { binding: 0, resource: state.pixelTexture.createView() },
-                        { binding: 1, resource: linearTexture.createView() },
-                        { binding: 2, resource: { buffer: paramsBuffer } },
+                        { binding: 1, resource: textureSampler },
                     ],
-                }));
-                computePass.dispatchWorkgroups(Math.ceil(img.width / 8), Math.ceil(img.height / 8));
-                computePass.end();
-                state.webgpu.device.queue.submit([computeEncoder.finish()]);
+                });
 
-                // Render to canvas
-                const renderEncoder = state.webgpu.device.createCommandEncoder();
-                const renderPass = renderEncoder.beginRenderPass({
+                // Render directly to canvas
+                const commandEncoder = state.webgpu.device.createCommandEncoder();
+                const renderPassEncoder = commandEncoder.beginRenderPass({
                     colorAttachments: [{
-                        view: state.webgpu.context.getCurrentTexture().createView(),
+                        view: state.webgpu.context.getCurrentTexture().createView({
+                            format: state.webgpu.presentationFormat + '-srgb'
+                        }),
                         clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
                         loadOp: 'clear',
                         storeOp: 'store',
                     }],
                 });
-                renderPass.setPipeline(state.webgpu.pipelines.renderToCanvas);
-                renderPass.setBindGroup(0, state.webgpu.device.createBindGroup({
-                    layout: state.webgpu.pipelines.renderToCanvas.getBindGroupLayout(0),
-                    entries: [
-                        { binding: 0, resource: linearTexture.createView() },
-                        { binding: 1, resource: textureSampler }, // Add sampler here too
-                    ],
-                }));
-                renderPass.draw(6);
-                renderPass.end();
-                state.webgpu.device.queue.submit([renderEncoder.finish()]);
+
+                renderPassEncoder.setPipeline(state.webgpu.pipelines.renderToCanvas);
+                renderPassEncoder.setBindGroup(0, renderToCanvasBindGroup);
+                renderPassEncoder.draw(6);  // 6 vertices for fullscreen quad
+                renderPassEncoder.end();
+
+                // Submit command to GPU
+                state.webgpu.device.queue.submit([commandEncoder.finish()]);
 
                 state.webgpu.device.queue.onSubmittedWorkDone();
             }
@@ -707,7 +688,7 @@
             }
         }
 
-        const debouncedUpdateEffect = debounce(updateEffect, 20);
+        const debouncedUpdateEffect = updateEffect;
 
         // Use the debounced function for continuous input events
         blurStrength.addEventListener('input', debouncedUpdateEffect);
