@@ -13,5 +13,7 @@
 - instead of my thing do the thing from the paper, comparing sample vs center coc and depth etc
 - saving image!!
 - performance optimzation 80/20
+    - textures!! -> less samples inshallah
+    - 
 
 square: 300ms on big mariam image

@@ -3,8 +3,8 @@ struct Params {
     height: u32,
 }
 
-@group(0) @binding(0) var<storage, read> inputPacked: array<u32>;
-@group(0) @binding(1) var<storage, read_write> outputLinear: array<vec4<f32>>;
+@group(0) @binding(0) var packedTexture: texture_2d<u32>;
+@group(0) @binding(1) var linearTexture: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> params: Params;
 
 // Convert sRGB to linear RGB
@@ -41,8 +41,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
     
-    let idx = y * params.width + x;
+    // Read packed u32 from texture
+    let packedColor = textureLoad(packedTexture, vec2<u32>(x, y), 0).r;
     
-    // Convert packed u32 to linear vec4<f32>
-    outputLinear[idx] = unpackToLinear(inputPacked[idx]);
+    // Convert packed u32 to linear vec4<f32> and write to output texture
+    textureStore(linearTexture, vec2<u32>(x, y), unpackToLinear(packedColor));
 }

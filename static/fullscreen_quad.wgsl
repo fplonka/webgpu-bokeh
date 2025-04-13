@@ -37,7 +37,7 @@ struct Params {
   height: u32,
 }
 
-@group(0) @binding(0) var<storage, read> inputLinear: array<vec4<f32>>;
+@group(0) @binding(0) var linearTexture: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> params: Params;
 
 // Convert linear RGB to sRGB
@@ -51,16 +51,16 @@ fn linearToSrgb(x: f32) -> f32 {
 
 @fragment
 fn fragment_main(@location(0) fragUV : vec2f) -> @location(0) vec4f {
-  let x = u32(fragUV.x * f32(params.width));
-  let y = u32(fragUV.y * f32(params.height));
+  let x = i32(fragUV.x * f32(params.width));
+  let y = i32(fragUV.y * f32(params.height));
   
   // Bounds check
-  if (x >= params.width || y >= params.height) {
+  if (x >= i32(params.width) || y >= i32(params.height)) {
     return vec4f(0.0, 0.0, 0.0, 1.0);
   }
   
-  let idx = y * params.width + x;
-  let linearColor = inputLinear[idx];
+  // Read linear color from texture
+  let linearColor = textureLoad(linearTexture, vec2<i32>(x, y), 0);
   
   // Convert linear to sRGB
   return vec4f(

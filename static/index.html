@@ -116,10 +116,11 @@
         const state = {
             // Image and depth data
             dimensions: { width: 0, height: 0 },
-            pixelBuffer: null, // WebGPU buffer for original pixels
+            pixelTexture: null, // WebGPU texture for original pixels
+            pixelData: null,    // Original pixel data for reuse
             depthMap: {
                 values: null, // float32 array of depth values, 0 to 1
-                buffer: null  // WebGPU buffer with the same stuff
+                texture: null  // WebGPU texture with the same stuff
                 // We need the values for the bokeh effect and when we click to set the focus point
             },
             // Focus and effect settings
@@ -158,15 +159,16 @@
 
                 this.dimensions.width = 0;
                 this.dimensions.height = 0;
-                if (this.pixelBuffer) {
-                    this.pixelBuffer.destroy();
-                    this.pixelBuffer = null;
+                if (this.pixelTexture) {
+                    this.pixelTexture.destroy();
+                    this.pixelTexture = null;
                 }
+                this.pixelData = null;
                 this.depthMap.values = null;
 
-                if (this.depthMap.buffer) {
-                    this.depthMap.buffer.destroy();
-                    this.depthMap.buffer = null;
+                if (this.depthMap.texture) {
+                    this.depthMap.texture.destroy();
+                    this.depthMap.texture = null;
                 }
 
                 setControlsEnabled(false);
@@ -346,34 +348,85 @@
             const canvas = originalCanvas;
             const focusDepth = state.focus.depth;
 
-            // Create CoC buffer
-            const cocBuffer = state.webgpu.device.createBuffer({
-                size: state.dimensions.width * state.dimensions.height * 4, // float32 for each pixel
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            // Create textures for processing
+
+            // Create depth texture (source from depth map)
+            const depthTexture = state.webgpu.device.createTexture({
+                size: {
+                    width: state.dimensions.width,
+                    height: state.dimensions.height,
+                },
+                format: 'r32float',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING,
             });
 
-            // Create buffers for linear space processing
-            const pixelCount = state.dimensions.width * state.dimensions.height;
-            const linearBufferSize = pixelCount * 16; // vec4<f32> uses 16 bytes per pixel
+            // Write depth data to the texture
+            state.webgpu.device.queue.writeTexture(
+                { texture: depthTexture },
+                state.depthMap.values,
+                { bytesPerRow: state.dimensions.width * 4 },
+                { width: state.dimensions.width, height: state.dimensions.height }
+            );
 
-            const linearBuffer = state.webgpu.device.createBuffer({
-                size: linearBufferSize,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            // Create CoC texture
+            const cocTexture = state.webgpu.device.createTexture({
+                size: {
+                    width: state.dimensions.width,
+                    height: state.dimensions.height,
+                },
+                format: 'r32float',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
             });
 
-            const intermediateLinearBuffer = state.webgpu.device.createBuffer({
-                size: linearBufferSize,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            // Create packed color texture (source image)
+            const packedTexture = state.webgpu.device.createTexture({
+                size: {
+                    width: state.dimensions.width,
+                    height: state.dimensions.height,
+                },
+                format: 'r32uint',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
             });
 
-            const outputLinearBuffer = state.webgpu.device.createBuffer({
-                size: linearBufferSize,
-                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            // Write packed image data to the texture
+            state.webgpu.device.queue.writeTexture(
+                { texture: packedTexture },
+                state.pixelData, // This should be set earlier when image is loaded
+                { bytesPerRow: state.dimensions.width * 4 },
+                { width: state.dimensions.width, height: state.dimensions.height }
+            );
+
+            // Create textures for linear space processing
+            const linearTexture = state.webgpu.device.createTexture({
+                size: {
+                    width: state.dimensions.width,
+                    height: state.dimensions.height,
+                },
+                format: 'rgba16float',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+            });
+
+            const intermediateLinearTexture = state.webgpu.device.createTexture({
+                size: {
+                    width: state.dimensions.width,
+                    height: state.dimensions.height,
+                },
+                format: 'rgba16float',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+            });
+
+            const outputLinearTexture = state.webgpu.device.createTexture({
+                size: {
+                    width: state.dimensions.width,
+                    height: state.dimensions.height,
+                },
+                format: 'rgba16float',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
             });
 
             // Calculate maxCoc and number of samples
             let maxCoc = 0.001 * 0.5 * (canvas.width + canvas.height) * Math.pow(2, state.effect.blurStrength);
-            const numSamples = Math.ceil(maxCoc / 2); // Set number of samples to half of max CoC
+            const numSamples = Math.ceil(1 + maxCoc / 4);
 
             const shaderParamsBuffer = state.webgpu.device.createBuffer({
                 size: 16, // 3 u32s (width, height, numSamples) + padding to 16 bytes
@@ -418,6 +471,14 @@
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             });
 
+            // Create a sampler for texture sampling
+            const textureSampler = state.webgpu.device.createSampler({
+                magFilter: 'linear',
+                minFilter: 'linear',
+                addressModeU: 'clamp-to-edge',
+                addressModeV: 'clamp-to-edge',
+            });
+
             // Write the offsets to the GPU
             state.webgpu.device.queue.writeBuffer(horizontalOffsetsBuffer, 0, horizontalOffsets);
             state.webgpu.device.queue.writeBuffer(verticalOffsetsBuffer, 0, verticalOffsets);
@@ -448,8 +509,8 @@
             const cocBindGroup = state.webgpu.device.createBindGroup({
                 layout: state.webgpu.pipelines.coc.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: { buffer: state.depthMap.buffer } },
-                    { binding: 1, resource: { buffer: cocBuffer } },
+                    { binding: 0, resource: depthTexture.createView() },
+                    { binding: 1, resource: cocTexture.createView() },
                     { binding: 2, resource: { buffer: shaderParamsBuffer } },
                     { binding: 3, resource: { buffer: cocParamsBuffer } },
                 ],
@@ -459,8 +520,8 @@
             const toLinearBindGroup = state.webgpu.device.createBindGroup({
                 layout: state.webgpu.pipelines.toLinear.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: { buffer: state.pixelBuffer } },
-                    { binding: 1, resource: { buffer: linearBuffer } },
+                    { binding: 0, resource: packedTexture.createView() },
+                    { binding: 1, resource: linearTexture.createView() },
                     { binding: 2, resource: { buffer: convertParamsBuffer } },
                 ],
             });
@@ -469,11 +530,12 @@
             const blurHBindGroup = state.webgpu.device.createBindGroup({
                 layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: { buffer: linearBuffer } },
-                    { binding: 1, resource: { buffer: intermediateLinearBuffer } },
+                    { binding: 0, resource: linearTexture.createView() },
+                    { binding: 1, resource: intermediateLinearTexture.createView() },
                     { binding: 2, resource: { buffer: shaderParamsBuffer } },
-                    { binding: 3, resource: { buffer: cocBuffer } },
+                    { binding: 3, resource: cocTexture.createView() },
                     { binding: 4, resource: { buffer: horizontalOffsetsBuffer } },
+                    { binding: 5, resource: textureSampler },
                 ],
             });
 
@@ -481,11 +543,12 @@
             const blurVBindGroup = state.webgpu.device.createBindGroup({
                 layout: state.webgpu.pipelines.blurDirectional.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: { buffer: intermediateLinearBuffer } },
-                    { binding: 1, resource: { buffer: outputLinearBuffer } },
+                    { binding: 0, resource: intermediateLinearTexture.createView() },
+                    { binding: 1, resource: outputLinearTexture.createView() },
                     { binding: 2, resource: { buffer: shaderParamsBuffer } },
-                    { binding: 3, resource: { buffer: cocBuffer } },
+                    { binding: 3, resource: cocTexture.createView() },
                     { binding: 4, resource: { buffer: verticalOffsetsBuffer } },
+                    { binding: 5, resource: textureSampler },
                 ],
             });
 
@@ -493,7 +556,7 @@
             const renderToCanvasBindGroup = state.webgpu.device.createBindGroup({
                 layout: state.webgpu.pipelines.renderToCanvas.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: { buffer: outputLinearBuffer } },
+                    { binding: 0, resource: outputLinearTexture.createView() },
                     { binding: 1, resource: { buffer: convertParamsBuffer } },
                 ],
             });
@@ -582,13 +645,24 @@
             const pixelData = new Uint32Array(tempCtx.getImageData(0, 0, img.width, img.height).data.buffer);
 
             if (state.webgpu.device) {
-                // Create/update input buffer
-                if (state.pixelBuffer) state.pixelBuffer.destroy();
-                state.pixelBuffer = state.webgpu.device.createBuffer({
-                    size: img.width * img.height * 4,
-                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                // Create/update input texture
+                if (state.pixelTexture) state.pixelTexture.destroy();
+                state.pixelTexture = state.webgpu.device.createTexture({
+                    size: {
+                        width: img.width,
+                        height: img.height,
+                    },
+                    format: 'r32uint',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
                 });
-                state.webgpu.device.queue.writeBuffer(state.pixelBuffer, 0, pixelData);
+                state.webgpu.device.queue.writeTexture(
+                    { texture: state.pixelTexture },
+                    pixelData,
+                    { bytesPerRow: img.width * 4 },
+                    { width: img.width, height: img.height }
+                );
+                // Store pixel data for later reuse
+                state.pixelData = pixelData;
 
                 // Create uniform buffer for dimensions
                 const paramsBuffer = state.webgpu.device.createBuffer({
@@ -597,10 +671,14 @@
                 });
                 state.webgpu.device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([img.width, img.height, 0, 0]));
 
-                // Create linear color space buffer
-                const linearBuffer = state.webgpu.device.createBuffer({
-                    size: img.width * img.height * 16,
-                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                // Create linear color space texture
+                const linearTexture = state.webgpu.device.createTexture({
+                    size: {
+                        width: img.width,
+                        height: img.height,
+                    },
+                    format: 'rgba16float',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
                 });
 
                 // Convert to linear space
@@ -611,8 +689,8 @@
                 computePass.setBindGroup(0, state.webgpu.device.createBindGroup({
                     layout: state.webgpu.pipelines.toLinear.getBindGroupLayout(0),
                     entries: [
-                        { binding: 0, resource: { buffer: state.pixelBuffer } },
-                        { binding: 1, resource: { buffer: linearBuffer } },
+                        { binding: 0, resource: state.pixelTexture.createView() },
+                        { binding: 1, resource: linearTexture.createView() },
                         { binding: 2, resource: { buffer: paramsBuffer } },
                     ],
                 }));
@@ -634,7 +712,7 @@
                 renderPass.setBindGroup(0, state.webgpu.device.createBindGroup({
                     layout: state.webgpu.pipelines.renderToCanvas.getBindGroupLayout(0),
                     entries: [
-                        { binding: 0, resource: { buffer: linearBuffer } },
+                        { binding: 0, resource: linearTexture.createView() },
                         { binding: 1, resource: { buffer: paramsBuffer } },
                     ],
                 }));
@@ -751,18 +829,26 @@
                     width: state.dimensions.width,
                     height: state.dimensions.height,
                     values: new Float32Array(result.depth.data).map(v => v / 255),
-                    buffer: null
+                    texture: null
                 };
 
-                // Create the depth buffer once when we first get the depth map
+                // Create the depth texture once when we first get the depth map
                 if (state.webgpu.device && state.depthMap.values) {
-                    // Create a single reusable depth buffer
-                    const depthBufferSize = state.dimensions.width * state.dimensions.height * 4; // float32 values
-                    state.depthMap.buffer = state.webgpu.device.createBuffer({
-                        size: depthBufferSize,
-                        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                    // Create a single reusable depth texture
+                    state.depthMap.texture = state.webgpu.device.createTexture({
+                        size: {
+                            width: state.dimensions.width,
+                            height: state.dimensions.height,
+                        },
+                        format: 'r32float',
+                        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING,
                     });
-                    state.webgpu.device.queue.writeBuffer(state.depthMap.buffer, 0, state.depthMap.values);
+                    state.webgpu.device.queue.writeTexture(
+                        { texture: state.depthMap.texture },
+                        state.depthMap.values,
+                        { bytesPerRow: state.dimensions.width * 4 },
+                        { width: state.dimensions.width, height: state.dimensions.height }
+                    );
                 }
 
 

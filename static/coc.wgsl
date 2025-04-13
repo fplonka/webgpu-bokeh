@@ -1,5 +1,5 @@
-@group(0) @binding(0) var<storage, read> depthMap: array<f32>;
-@group(0) @binding(1) var<storage, read_write> cocBuffer: array<f32>;
+@group(0) @binding(0) var depthTexture: texture_2d<f32>;
+@group(0) @binding(1) var cocTexture: texture_storage_2d<r32float, write>;
 @group(0) @binding(2) var<uniform> dimensions: vec2<u32>;
 @group(0) @binding(3) var<uniform> params: Params;
 
@@ -29,8 +29,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if x >= dimensions.x || y >= dimensions.y {
         return;
     }
-
-    let idx = y * dimensions.x + x;
-    let depth = depthMap[idx];
-    cocBuffer[idx] = calculate_coc_radius(depth, params.focus_depth);
+    
+    // Read depth from texture
+    let depth = textureLoad(depthTexture, vec2<u32>(x, y), 0).r;
+    
+    // Write coc radius to texture
+    textureStore(cocTexture, vec2<u32>(x, y), vec4<f32>(calculate_coc_radius(depth, params.focus_depth), 0.0, 0.0, 0.0));
 } 
