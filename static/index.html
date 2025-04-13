@@ -221,18 +221,19 @@
 
         blurStrength.addEventListener('input', (e) => {
             blurStrengthValue.value = e.target.value;
-            updateEffect();
+            debouncedUpdateEffect();
         });
         blurStrengthValue.addEventListener('change', (e) => {
             blurStrength.value = e.target.value;
-            updateEffect();
+            debouncedUpdateEffect();
         });
         depthOfField.addEventListener('input', (e) => {
             depthOfFieldValue.value = e.target.value;
+            debouncedUpdateEffect();
         });
         depthOfFieldValue.addEventListener('input', (e) => {
             depthOfField.value = e.target.value;
-            updateEffect();
+            debouncedUpdateEffect();
         });
 
         async function initWebGPU() {
@@ -676,6 +677,17 @@
             statusText.style.visibility = visible ? 'visible' : 'hidden';
         }
 
+        // Debounce function to limit how often a function can be called
+        function debounce(func, wait) {
+            let timeout;
+            return function (...args) {
+                clearTimeout(timeout);
+                timeout = setTimeout(() => {
+                    func.apply(this, args);
+                }, wait);
+            };
+        }
+
         // Add event listeners for the sliders to reapply effect when changed
         async function updateEffect() {
             if (!state.focus.x || !state.focus.y) return;
@@ -695,8 +707,11 @@
             }
         }
 
-        blurStrength.addEventListener('input', updateEffect);
-        depthOfField.addEventListener('input', updateEffect);
+        const debouncedUpdateEffect = debounce(updateEffect, 20);
+
+        // Use the debounced function for continuous input events
+        blurStrength.addEventListener('input', debouncedUpdateEffect);
+        depthOfField.addEventListener('input', debouncedUpdateEffect);
         bokehShape.addEventListener('change', updateEffect);
         backgroundOnly.addEventListener('change', updateEffect);
 
