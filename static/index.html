@@ -261,7 +261,6 @@
             const canvas = originalCanvas;
             state.webgpu.context = canvas.getContext('webgpu');
             state.webgpu.presentationFormat = navigator.gpu.getPreferredCanvasFormat();
-            console.log("presentation format:", state.webgpu.presentationFormat)
             state.webgpu.context.configure({
                 device: state.webgpu.device,
                 format: state.webgpu.presentationFormat,
@@ -340,8 +339,6 @@
                     entryPoint: 'main'
                 }
             });
-
-            console.log("WebGPU initialized with directional blur and combine pipelines");
         }
 
         async function applyBokeh() {
@@ -352,26 +349,6 @@
             // Get the selected bokeh shape
             const selectedShape = bokehShape.value; // 'circle', 'square', or 'hexagon'
             console.log(`Applying bokeh effect with shape: ${selectedShape}`);
-
-            // Create textures for processing
-
-            // Create depth texture (source from depth map)
-            const depthTexture = state.webgpu.device.createTexture({
-                size: {
-                    width: state.dimensions.width,
-                    height: state.dimensions.height,
-                },
-                format: 'r32float',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING,
-            });
-
-            // Write depth data to the texture
-            state.webgpu.device.queue.writeTexture(
-                { texture: depthTexture },
-                state.depthMap.values,
-                { bytesPerRow: state.dimensions.width * 4 },
-                { width: state.dimensions.width, height: state.dimensions.height }
-            );
 
             // Create CoC texture
             const cocTexture = state.webgpu.device.createTexture({
@@ -660,7 +637,7 @@
 
                 return outputTexture;
             }
-            
+
             // Process octagon bokeh with 0°+90° and 45°+135° directional blurs
             function processOctagonBokeh(commandEncoder, cocTexture, shaderParamsBuffer, textureSampler) {
                 // Generate offsets for 0°, 45°, 90°, and 135° directions
@@ -888,7 +865,7 @@
             const cocBindGroup = state.webgpu.device.createBindGroup({
                 layout: state.webgpu.pipelines.coc.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: depthTexture.createView() },
+                    { binding: 0, resource: state.depthMap.texture.createView() },
                     { binding: 1, resource: cocTexture.createView() },
                     { binding: 2, resource: { buffer: cocParamsBuffer } },
                 ],
@@ -1159,27 +1136,20 @@
                     values: new Float32Array(result.depth.data).map(v => v / 255),
                     texture: null
                 };
-
-                // Create the depth texture once when we first get the depth map
-                if (state.webgpu.device && state.depthMap.values) {
-                    // Create a single reusable depth texture
-                    state.depthMap.texture = state.webgpu.device.createTexture({
-                        size: {
-                            width: state.dimensions.width,
-                            height: state.dimensions.height,
-                        },
-                        format: 'r32float',
-                        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING,
-                    });
-                    state.webgpu.device.queue.writeTexture(
-                        { texture: state.depthMap.texture },
-                        state.depthMap.values,
-                        { bytesPerRow: state.dimensions.width * 4 },
-                        { width: state.dimensions.width, height: state.dimensions.height }
-                    );
-                }
-
-
+                state.depthMap.texture = state.webgpu.device.createTexture({
+                    size: {
+                        width: state.dimensions.width,
+                        height: state.dimensions.height,
+                    },
+                    format: 'r32float',
+                    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING,
+                });
+                state.webgpu.device.queue.writeTexture(
+                    { texture: state.depthMap.texture },
+                    state.depthMap.values,
+                    { bytesPerRow: state.dimensions.width * 4 },
+                    { width: state.dimensions.width, height: state.dimensions.height }
+                );
 
                 updateStatus('Ready! Click anywhere to set focus point.');
             } catch (error) {
