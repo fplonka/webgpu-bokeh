@@ -14,4 +14,6 @@
 
 - texture from canvas? and skip frag shader?
 
+- make the demo image static, just a file
+
 square: 300ms on big mariam image
