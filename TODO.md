@@ -12,6 +12,6 @@
 
 - texture from canvas? and skip frag shader?
 
-- good name........
+- (slow) circular bokeh
 
 square: 300ms on big mariam image
