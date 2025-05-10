@@ -12,4 +12,6 @@
 
 - texture from canvas? and skip frag shader?
 
+- good name........
+
 square: 300ms on big mariam image

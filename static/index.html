@@ -7,7 +7,6 @@
     <title>bokeh effect generator</title>
     <link href="output.css" rel="stylesheet">
     <style>
-        /* Essential styles for click indicator and loading spinner */
         .click-indicator {
             position: absolute;
             width: 6px;
@@ -67,55 +66,41 @@
 
         <input class="mt-2" type="file" id="imageUpload" accept="image/*">
 
-        <div class="mt-6">
-            <div class="relative">
-                <div class="relative">
-                    <div class="relative w-full overflow-hidden flex justify-center items-center">
-                        <div class="relative"> <!-- Canvas wrapper for positioning -->
-                            <canvas id="originalCanvas"
-                                class="max-h-[65vh] max-w-full w-auto h-auto object-contain"></canvas>
-                            <div id="clickIndicator" class="click-indicator" style="display: none;"></div>
-                            <div id="loadingOverlay" class="loading-overlay">
-                                <div class="spinner"></div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+        <div class="mt-6 relative w-full overflow-hidden flex justify-center items-center">
+            <canvas id="originalCanvas" class="max-h-[65vh] max-w-full object-contain"></canvas>
+            <div id="clickIndicator" class="click-indicator" style="display:none;"></div>
+            <div id="loadingOverlay" class="loading-overlay">
+                <div class="spinner"></div>
+            </div>
+        </div>
+        <div id="statusText" class="mt-4 h-6 text-zinc-500">Loading depth model...</div>
 
-
-                <div id="statusText" class="mt-4 h-6 block text-zinc-500">
-                    Loading depth model, please wait...
-                </div>
-
-                <div class="mt-3 space-y-4">
-                    <div class="flex items-center gap-4">
-                        <label for="blurStrength" class="w-24">Blur Strength</label>
-                        <!-- TODO: max 6 -->
-                        <input type="range" id="blurStrength" min="1" max="7" step="0.1" value="5" class="flex-1"
-                            disabled>
-                        <input type="number" id="blurStrengthValue" min="1" max="7" step="0.1" value="5" class="w-16"
-                            disabled>
-                    </div>
-                    <div class="flex items-center gap-4">
-                        <label for="depthOfField" class="w-24">Depth of Field</label>
-                        <input type="range" id="depthOfField" min="0.01" max="0.5" step="0.01" value="0.1"
-                            class="flex-1" disabled>
-                        <input type="number" id="depthOfFieldValue" min="0.01" max="0.5" step="0.01" value="0.1"
-                            class="w-16" disabled>
-                    </div>
-                    <div class="flex items-center gap-4">
-                        <label for="bokehShape" class="w-24">Bokeh Shape</label>
-                        <select id="bokehShape" class="rounded border border-gray-300 px-2 py-1" disabled>
-                            <option value="hexagon" selected>Hexagon</option>
-                            <option value="octagon">Octagon</option>
-                            <option value="square">Square</option>
-                        </select>
-                    </div>
-                    <div class="flex items-center gap-4">
-                        <label for="backgroundOnly" class="w-72">Only blur background (reduces artifacts)</label>
-                        <input type="checkbox" id="backgroundOnly" class="h-4 w-4" checked disabled>
-                    </div>
-                </div>
+        <div class="mt-3 space-y-4">
+            <div class="flex items-center gap-4">
+                <label for="blurStrength" class="w-24">Blur Strength</label>
+                <input type="range" id="blurStrength" min="1" max="7" step="0.1" value="5" class="flex-1"
+                    disabled>
+                <input type="number" id="blurStrengthValue" min="1" max="7" step="0.1" value="5" class="w-16"
+                    disabled>
+            </div>
+            <div class="flex items-center gap-4">
+                <label for="depthOfField" class="w-24">Depth of Field</label>
+                <input type="range" id="depthOfField" min="0.01" max="0.5" step="0.01" value="0.1"
+                    class="flex-1" disabled>
+                <input type="number" id="depthOfFieldValue" min="0.01" max="0.5" step="0.01" value="0.1"
+                    class="w-16" disabled>
+            </div>
+            <div class="flex items-center gap-4">
+                <label for="bokehShape" class="w-24">Bokeh Shape</label>
+                <select id="bokehShape" class="rounded border border-gray-300 px-2 py-1" disabled>
+                    <option value="hexagon" selected>Hexagon</option>
+                    <option value="octagon">Octagon</option>
+                    <option value="square">Square</option>
+                </select>
+            </div>
+            <div class="flex items-center gap-4">
+                <label for="backgroundOnly" class="w-72">Only blur background (reduces artifacts)</label>
+                <input type="checkbox" id="backgroundOnly" class="h-4 w-4" checked disabled>
             </div>
         </div>
     </div>
@@ -354,7 +339,7 @@
         }
 
         async function applyBokeh() {
-            await new Promise(resolve => setTimeout(resolve, 5)); // cursed: to let the 'processing...' status update get drawn
+            await new Promise(resolve => setTimeout(resolve, 5));
             const canvas = originalCanvas;
             const focusDepth = state.focus.depth;
 
