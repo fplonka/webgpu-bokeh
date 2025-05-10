@@ -1071,13 +1071,13 @@
             const x = Math.floor((event.clientX - rect.left) * scaleX);
             const y = Math.floor((event.clientY - rect.top) * scaleY);
 
-            // Get canvas and its positioning information
-            const canvasRect = originalCanvas.getBoundingClientRect();
-
-            // Calculate position relative to the canvas itself, not the container
+            // Position dot relative to the container to handle centered canvas
+            const container = originalCanvas.parentElement;
+            const containerRect = container.getBoundingClientRect();
+            
             clickIndicator.style.display = 'block';
-            clickIndicator.style.left = (event.clientX - canvasRect.left) + 'px';
-            clickIndicator.style.top = (event.clientY - canvasRect.top) + 'px';
+            clickIndicator.style.left = (event.clientX - containerRect.left) + 'px';
+            clickIndicator.style.top = (event.clientY - containerRect.top) + 'px';
 
             // Update focus state
             state.focus.x = x;
