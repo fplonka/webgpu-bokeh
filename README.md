@@ -6,7 +6,9 @@ This is the code for [bokeh-magic](https://bokeh.fplonka.dev/), a web applicatio
 
 You upload an image, click to set the focus point, then adjust the sliders to control the blur effect. Bokeh Magic runs entirely in the browser, using WebGPU to compute the blur effect quickly.
 
-Requires browser WebGPU support # TODO: 
+Requires browser WebGPU support. In newer Chrome and Edge versions everything should just work, for Firefox you need Firefox Nightly, for Safari you need Safari Technology Preview.
+
+Currently, WebGPU is supported in Chrome (v121+), Edge (v121+), and Firefox (v123+). See [here](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API#browser_compatibility) for detailed implementation status.
 
 ## Implementation
 
