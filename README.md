@@ -2,7 +2,7 @@
 
 This is the code for [bokeh-magic](https://bokeh.fplonka.dev/), a web application that creates realistic bokeh blur effects on images using depth estimation and WebGPU.
 
-TODO: demo gif
+![demo](https://github.com/user-attachments/assets/2d867bbd-9322-42c1-b5cd-29466ad968b3)
 
 You upload an image, click to set the focus point, then adjust the sliders to control the blur effect. Bokeh Magic runs entirely in the browser, using WebGPU to compute the blur effect quickly.
 
