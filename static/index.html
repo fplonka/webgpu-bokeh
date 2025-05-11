@@ -68,6 +68,9 @@
 
         <div class="mt-6 relative w-full overflow-hidden flex justify-center items-center">
             <canvas id="originalCanvas" class="max-h-[65vh] max-w-full object-contain"></canvas>
+            <img id="overlayImage"
+                class="absolute top-0 left-0 right-0 bottom-0 max-h-[65vh] max-w-full object-contain opacity-0 pointer-events-auto"
+                alt="" />
             <div id="clickIndicator" class="click-indicator" style="display:none;"></div>
             <div id="loadingOverlay" class="loading-overlay">
                 <div class="spinner"></div>
@@ -185,6 +188,15 @@
         }
         recursiveSeal(state);
 
+        // Function to update the overlay image with canvas content
+        function updateOverlayImage() {
+            try {
+                overlayImage.src = originalCanvas.toDataURL('image/png');
+            } catch (error) {
+                console.error('Error updating overlay image:', error);
+            }
+        }
+
         // Start loading the depth model
         import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.2/dist/transformers.min.js';
         pipeline('depth-estimation', 'onnx-community/depth-anything-v2-base', {
@@ -200,6 +212,7 @@
         // UI element references
         const imageUpload = document.getElementById('imageUpload');
         const originalCanvas = document.getElementById('originalCanvas');
+        const overlayImage = document.getElementById('overlayImage');
         const loadingOverlay = document.getElementById('loadingOverlay');
         const blurStrength = document.getElementById('blurStrength');
         const blurStrengthValue = document.getElementById('blurStrengthValue');
@@ -930,6 +943,9 @@
             await state.webgpu.device.queue.onSubmittedWorkDone()
             console.timeEnd('gpu work')
 
+            // Update overlay image with canvas content for right-click saving
+            updateOverlayImage();
+
             console.log("Bokeh effect applied with focus depth:", focusDepth, "max_coc:", maxCoc, "depth_of_field:", depthOfField.value);
         }
 
@@ -1013,6 +1029,8 @@
         // Already declared above
         const controls = document.querySelectorAll('input[type="range"], input[type="number"], input[type="checkbox"], select');
 
+
+
         function updateStatus(text, visible = true) {
             statusText.textContent = text;
             statusText.style.visibility = visible ? 'visible' : 'hidden';
@@ -1056,7 +1074,7 @@
         bokehShape.addEventListener('change', updateEffect);
         backgroundOnly.addEventListener('change', updateEffect);
 
-        originalCanvas.addEventListener('click', async (event) => {
+        overlayImage.addEventListener('click', async (event) => {
             if (!state.depthMap.values) return;
 
             updateStatus('Processing...');
@@ -1106,6 +1124,9 @@
 
                 // Draw the image on the canvas
                 drawImageToCanvas(originalCanvas, image);
+
+                // Update overlay image after drawing to canvas
+                updateOverlayImage();
 
                 // Enable click handling if model is ready
                 if (!state.model.loading) {
