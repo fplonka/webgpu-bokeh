@@ -943,9 +943,6 @@
             await state.webgpu.device.queue.onSubmittedWorkDone()
             console.timeEnd('gpu work')
 
-            // Update overlay image with canvas content for right-click saving
-            updateOverlayImage();
-
             console.log("Bokeh effect applied with focus depth:", focusDepth, "max_coc:", maxCoc, "depth_of_field:", depthOfField.value);
         }
 
@@ -1068,11 +1065,25 @@
 
         const debouncedUpdateEffect = updateEffect;
 
-        // Use the debounced function for continuous input events
+        // For continuous slider updates - no overlay update
         blurStrength.addEventListener('input', debouncedUpdateEffect);
         depthOfField.addEventListener('input', debouncedUpdateEffect);
-        bokehShape.addEventListener('change', updateEffect);
-        backgroundOnly.addEventListener('change', updateEffect);
+        
+        // For slider release - update the overlay
+        blurStrength.addEventListener('change', () => {
+            updateEffect().then(() => updateOverlayImage());
+        });
+        depthOfField.addEventListener('change', () => {
+            updateEffect().then(() => updateOverlayImage());
+        });
+        
+        // For direct value changes - update the overlay
+        bokehShape.addEventListener('change', () => {
+            updateEffect().then(() => updateOverlayImage());
+        });
+        backgroundOnly.addEventListener('change', () => {
+            updateEffect().then(() => updateOverlayImage());
+        });
 
         overlayImage.addEventListener('click', async (event) => {
             if (!state.depthMap.values) return;
@@ -1105,6 +1116,7 @@
 
             console.log(`Depth at (${x}, ${y}): ${state.focus.depth.toFixed(3)}`);
             await applyBokeh();
+            updateOverlayImage();
             updateStatus('Processing...', false);
             setControlsEnabled(true);
         });
